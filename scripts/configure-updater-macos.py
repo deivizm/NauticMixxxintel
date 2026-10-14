@@ -9,7 +9,8 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 PUBLIC_KEY = 'qYtGKN6CDB8eym6vRj4XcUD3kLJON9zeYBtlVoEN7Dk='
-FEED_URL = 'https://github.com/nauticsoftware/NauticMixxx/releases/latest/download/appcast-macos.xml'
+FEED_URL = os.environ.get('NAUTIC_UPDATE_FEED_URL',
+                          'https://github.com/nauticsoftware/NauticMixxx/releases/latest/download/appcast-macos.xml')
 
 def configure(app, sdk, identity='-'):
     app, sdk = Path(app).resolve(), Path(sdk).resolve()
