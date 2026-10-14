@@ -1,0 +1,116 @@
+name: Compilar DMG Intel (macOS x64)
+
+# Botón manual en la pestaña Actions: genera NauticMixxx-<versión>-macOS-x64.dmg
+# para Mac Intel con macOS 11 Big Sur o posterior (incluido 12 Monterey).
+on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: "Ejecutar las pruebas RX3 tras compilar"
+        type: boolean
+        default: true
+      publish_release:
+        description: "Adjuntar también el DMG a una release 'intel-<versión>'"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build-dmg:
+    runs-on: macos-15-intel
+    timeout-minutes: 360
+    env:
+      RX3_ARCH: x64
+      RX3_BUILD_ROOT: ${{ github.workspace }}/../rx3-work
+      RX3_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Herramientas
+        run: |
+          brew install ninja create-dmg
+          cmake --version | head -1
+          ninja --version
+
+      - name: Caché de dependencias (Mixxx 2.5.6, Sparkle)
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/../rx3-work/mixxx-2.5.6.tar.gz
+            ${{ github.workspace }}/../rx3-work/dependencies-x64.zip
+            ${{ github.workspace }}/../rx3-work/Sparkle-*.tar.xz
+          key: rx3-deps-x64-40c29ff-${{ hashFiles('scripts/sparkle-sdk.py') }}
+
+      - name: Compilar NauticMixxx.app (x86_64)
+        run: |
+          if [ "${{ inputs.run_tests }}" != "true" ]; then export RX3_SKIP_TESTS=1; fi
+          ./scripts/build-mixxx-rx3-macos.sh
+
+      - name: Comprobar arquitectura y versión mínima
+        run: |
+          app="$RX3_BUILD_ROOT/stage/NauticMixxx.app"
+          exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Contents/Info.plist")"
+          archs=$(lipo -archs "$exe"); echo "Arquitecturas: $archs"
+          echo "$archs" | grep -q x86_64
+          minos=$(vtool -show-build "$exe" | awk '/minos/{print $2; exit}'); echo "macOS mínimo: $minos"
+          [ "${minos%%.*}" -le 12 ]
+          # Ninguna librería incluida puede exigir un macOS posterior a Monterey.
+          bad=0
+          while IFS= read -r f; do
+            if file "$f" | grep -q 'Mach-O'; then
+              m=$(vtool -arch x86_64 -show-build "$f" 2>/dev/null | awk '/minos/{print $2; exit}')
+              if [ -n "$m" ] && [ "${m%%.*}" -gt 12 ]; then echo "Requiere macOS $m: $f"; bad=1; fi
+            fi
+          done < <(find "$app" -type f)
+          [ "$bad" = 0 ]
+
+      - name: Crear DMG
+        id: dmg
+        run: |
+          version=$(cat VERSION)
+          app="$RX3_BUILD_ROOT/stage/NauticMixxx.app"
+          out="$RUNNER_TEMP/NauticMixxx-$version-macOS-x64.dmg"
+          root="$RUNNER_TEMP/dmg-root"; mkdir -p "$root"
+          ditto "$app" "$root/NauticMixxx.app"
+          ./scripts/build-app-icon-macos.sh "$RUNNER_TEMP/NauticMixxx.icns"
+          create-dmg \
+            --skip-jenkins \
+            --add-file ".DS_Store" packaging/macos/dmg-layout.dsstore 0 0 \
+            --volname "NauticMixxx $version" \
+            --volicon "$RUNNER_TEMP/NauticMixxx.icns" \
+            --window-pos 200 120 --window-size 600 360 --icon-size 112 \
+            --icon "NauticMixxx.app" 128 180 --hide-extension "NauticMixxx.app" \
+            --app-drop-link 472 180 --format UDZO \
+            "$out" "$root"
+          (cd "$RUNNER_TEMP" && shasum -a 256 "$(basename "$out")" > "$(basename "$out").sha256")
+          cat "$out.sha256"
+          echo "path=$out" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Subir DMG (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: NauticMixxx-${{ steps.dmg.outputs.version }}-macOS-x64
+          path: |
+            ${{ steps.dmg.outputs.path }}
+            ${{ steps.dmg.outputs.path }}.sha256
+          compression-level: 0
+          retention-days: 30
+
+      - name: Publicar release
+        if: ${{ inputs.publish_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="intel-${{ steps.dmg.outputs.version }}"
+          gh release view "$tag" >/dev/null 2>&1 || \
+            gh release create "$tag" --title "NauticMixxx ${{ steps.dmg.outputs.version }} · Mac Intel" \
+              --notes "Compilación no oficial para Mac Intel (macOS 11+). Firma ad hoc: la primera vez ábrelo con clic derecho → Abrir." \
+              --target "${{ github.sha }}"
+          gh release upload "$tag" "${{ steps.dmg.outputs.path }}" "${{ steps.dmg.outputs.path }}.sha256" --clobber
