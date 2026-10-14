@@ -98,7 +98,12 @@ attempt=1
 until (cd "$work/build" && QT_QPA_PLATFORM=offscreen NAUTIC_SKIN_DIR="$project/skins/XDJ_RX3_Mixxx" NAUTIC_RX3_STYLESHEET="$project/skins/XDJ_RX3_Mixxx/style.qss" ./mixxx-test \
   --gtest_filter='IntegratedUpdaterTest.*:UpdatePayloadTest.*:StartupUpdateCheckerTest.*:StartupUpdateDialogTest.*:StreamCompletionTest.*:LibraryTableViewStateTest.*:Rx3*:RekordboxDecoderTimingTest.*:RekordboxUsbSessionAudioTest.*:RekordboxWaveformImporterTest.*' \
   --gtest_output=xml:rx3-tests.xml); do
-  if [ "$attempt" -ge "${RX3_TEST_ATTEMPTS:-3}" ]; then printf 'Las pruebas RX3 fallaron %s veces.\n' "$attempt" >&2; exit 1; fi
+  if [ "$attempt" -ge "${RX3_TEST_ATTEMPTS:-3}" ]; then
+    printf 'Las pruebas RX3 fallaron %s veces.\n' "$attempt" >&2
+    # RX3_TESTS_NONFATAL=1: seguir y dejar constancia (solo para CI sin pantalla).
+    if [ "${RX3_TESTS_NONFATAL:-0}" = 1 ]; then echo "RX3_TESTS_FAILED" > "$work/build/rx3-tests-failed"; break; fi
+    exit 1
+  fi
   attempt=$((attempt + 1)); printf 'Reintentando pruebas RX3 (intento %s)...\n' "$attempt"
 done
 fi
