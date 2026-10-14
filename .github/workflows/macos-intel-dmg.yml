@@ -21,6 +21,9 @@ jobs:
   build-dmg:
     runs-on: macos-15-intel
     timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
     env:
       RX3_ARCH: x64
       RX3_BUILD_ROOT: ${{ github.workspace }}/../rx3-work
