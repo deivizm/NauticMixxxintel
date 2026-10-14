@@ -33,12 +33,15 @@ if [ -z "${RX3_BUILD_JOBS:-}" ]; then
     RX3_BUILD_JOBS=6
   fi
 fi
-work=${RX3_BUILD_ROOT:-"$project/build/test-candidate/$(cat "$project/VERSION")-native-$arch"}
+# RX3_WITH_S8=1 añade el soporte Kontrol S8 (HID + pantallas) de patches-s8/.
+with_s8=${RX3_WITH_S8:-0}
+s8_suffix=; [ "$with_s8" = 1 ] && s8_suffix=-s8
+work=${RX3_BUILD_ROOT:-"$project/build/test-candidate/$(cat "$project/VERSION")-native-$arch$s8_suffix"}
 mkdir -p "$work"
 # Ruta canónica (sin "..", enlaces ni /tmp→/private/tmp): fixup_bundle de CMake
 # compara rutas como texto y rechaza librerías si el prefijo no coincide.
 work=$(CDPATH= cd -- "$work" && pwd -P)
-printf 'NauticMixxx %s · %s · %s procesos\n' "$(cat "$project/VERSION")" "$arch" "$RX3_BUILD_JOBS"
+printf 'NauticMixxx %s · %s · %s procesos · Kontrol S8: %s\n' "$(cat "$project/VERSION")" "$arch" "$RX3_BUILD_JOBS" "$with_s8"
 fetch() {
   if [ ! -f "$2" ]; then curl --fail --location --retry 3 "$1" -o "$2"; fi
   actual=$(shasum -a 256 "$2" | awk '{print $1}')
@@ -52,7 +55,14 @@ if [ ! -d "$work/buildenv/$deps_name" ]; then
   mkdir -p "$work/buildenv"
   unzip -q "$work/dependencies-$arch.zip" -d "$work/buildenv"
 fi
-patch_digest=$(cat "$project"/patches/00[0-9][0-9]-*.patch | shasum -a 256 | awk '{print $1}')
+# Lista de parches en los argumentos posicionales (seguro con espacios en la ruta).
+set -- "$project"/patches/00[0-9][0-9]-*.patch
+if [ "$with_s8" = 1 ]; then
+  set -- "$@" "$project"/patches-s8/00[0-9][0-9]-*.patch
+  # Los mappings incluidos deben coincidir con el manifiesto del autor.
+  (cd "$project/vendor/kontrol-s8-mixxx-mappings" && shasum -a 256 -c SHA256SUMS)
+fi
+patch_digest=$(cat "$@" | shasum -a 256 | awk '{print $1}')
 source_tree="$work/mixxx-2.5.6"
 patch_marker="$source_tree/.rx3-patched"
 patch_signature="$source_tree/src/test/trackcapabilitypolicy_test.cpp"
@@ -64,13 +74,17 @@ if [ -f "$patch_marker" ] && [ "$(cat "$patch_marker")" != "$patch_digest" ]; th
   exit 1
 fi
 if [ ! -f "$patch_signature" ]; then
-  for patch in "$project"/patches/00[0-9][0-9]-*.patch; do
+  for patch in "$@"; do
     # The extracted tarball is nested inside the Mixxx working tree but is not
     # a repository. --no-index plus the ceiling keeps paths relative to this
     # source tree instead of accidentally applying them to the parent repo.
     (cd "$source_tree" && GIT_CEILING_DIRECTORIES="$work" git apply --no-index "$patch")
   done
   printf '%s\n' "$patch_digest" > "$patch_marker"
+fi
+if [ "$with_s8" = 1 ] && [ ! -f "$source_tree/src/controllers/bulk/nativenis8displaytransport.h" ]; then
+  printf 'El parche Kontrol S8 no está aplicado; usa otro RX3_BUILD_ROOT.\n' >&2
+  exit 1
 fi
 if [ ! -f "$patch_marker" ] || [ ! -f "$patch_signature" ] || [ "$(cat "$patch_marker")" != "$patch_digest" ]; then
   printf 'La carpeta fuente no coincide con el conjunto de parches NauticMixxx; usa otro RX3_BUILD_ROOT.\n' >&2
@@ -90,16 +104,18 @@ cmake -S "$work/mixxx-2.5.6" -B "$work/build" -G Ninja \
   -DQT6=ON -DQML=OFF -DAU_EFFECTS=OFF -DMACOS_BUNDLE=ON \
   '-DMACOS_BUNDLE_NAME=NauticMixxx' \
   '-DMACOS_BUNDLE_IDENTIFIER=org.mixxx.mixxx' \
-  -DBUILD_TESTING=ON -DBUILD_BENCH=OFF
+  -DBUILD_TESTING=ON -DBUILD_BENCH=OFF \
+  -DHID=ON -DBULK=ON
 cmake --build "$work/build" --target mixxx mixxx-test --parallel "$RX3_BUILD_JOBS"
 if [ "${RX3_SKIP_TESTS:-0}" = 1 ]; then
   printf 'Pruebas RX3 omitidas (RX3_SKIP_TESTS=1).\n'
 else
 # Las pruebas de interfaz dependen de temporizadores; en máquinas lentas o
 # compartidas pueden fallar por tiempo. Se reintentan hasta RX3_TEST_ATTEMPTS veces.
+s8_tests=; [ "$with_s8" = 1 ] && s8_tests=':S8Bridge289Test.*:LoopingControlTest.BeatjumpBackwardAtStartNeverSeeksBeforeTrack'
 attempt=1
 until (cd "$work/build" && QT_QPA_PLATFORM=offscreen NAUTIC_SKIN_DIR="$project/skins/XDJ_RX3_Mixxx" NAUTIC_RX3_STYLESHEET="$project/skins/XDJ_RX3_Mixxx/style.qss" ./mixxx-test \
-  --gtest_filter='IntegratedUpdaterTest.*:UpdatePayloadTest.*:StartupUpdateCheckerTest.*:StartupUpdateDialogTest.*:StreamCompletionTest.*:LibraryTableViewStateTest.*:Rx3*:RekordboxDecoderTimingTest.*:RekordboxUsbSessionAudioTest.*:RekordboxWaveformImporterTest.*' \
+  --gtest_filter="IntegratedUpdaterTest.*:UpdatePayloadTest.*:StartupUpdateCheckerTest.*:StartupUpdateDialogTest.*:StreamCompletionTest.*:LibraryTableViewStateTest.*:Rx3*:RekordboxDecoderTimingTest.*:RekordboxUsbSessionAudioTest.*:RekordboxWaveformImporterTest.*$s8_tests" \
   --gtest_output=xml:rx3-tests.xml); do
   if [ "$attempt" -ge "${RX3_TEST_ATTEMPTS:-3}" ]; then
     printf 'Las pruebas RX3 fallaron %s veces.\n' "$attempt" >&2
@@ -117,11 +133,22 @@ ditto "$project/controllers/Hercules_DJControl_Inpulse_500_RX3" "$app/Contents/R
 ditto "$project/controllers/Pioneer_DDJ_FLX4_RX3" "$app/Contents/Resources/controllers"
 ditto "$project/controllers/Pioneer_DDJ_FLX6_RX3" "$app/Contents/Resources/controllers"
 ditto "$project/controllers/Pioneer_Roland_RX3" "$app/Contents/Resources/controllers"
+if [ "$with_s8" = 1 ]; then
+  s8_vendor="$project/vendor/kontrol-s8-mixxx-mappings"
+  for f in Kontrol-S8-Mixxx-Windows-v1.0.hid.xml Kontrol-S8-Mixxx-Windows-v1.0.js \
+           Kontrol-S8-Mixxx-Windows-v1.0.bulk.xml Kontrol-S8-Mixxx-Windows-v1.0-display.js; do
+    cp "$s8_vendor/$f" "$app/Contents/Resources/controllers/$f"
+  done
+fi
 mkdir -p "$app/Contents/Resources/effects/chains" "$app/Contents/Resources/licenses"
 ditto "$project/effects/chains" "$app/Contents/Resources/effects/chains"
 cp "$project/skins/XDJ_RX3_Mixxx/LICENSE" "$app/Contents/Resources/licenses/NauticMixxx-GPL-3.0.txt"
 cp "$work/mixxx-2.5.6/LICENSE" "$app/Contents/Resources/licenses/Mixxx-LICENSE.txt"
 cp "$project/THIRD_PARTY_NOTICES.md" "$app/Contents/Resources/licenses/THIRD_PARTY_NOTICES.md"
+if [ "$with_s8" = 1 ]; then
+  cp "$s8_vendor/LICENSE" "$app/Contents/Resources/licenses/Kontrol-S8-Mixxx-mappings-GPL-2.0-or-later.txt"
+  cp "$s8_vendor/NOTICE.md" "$app/Contents/Resources/licenses/Kontrol-S8-Mixxx-mappings-NOTICE.md"
+fi
 "$project/scripts/build-app-icon-macos.sh" "$app/Contents/Resources/application.icns"
 # Mixxx also installs a secondary copy under Resources/osx. Keep both copies
 # identical, while CFBundleIconFile resolves the root Resources copy.

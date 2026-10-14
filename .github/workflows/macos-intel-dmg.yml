@@ -5,6 +5,10 @@ name: Compilar DMG Intel (macOS x64)
 on:
   workflow_dispatch:
     inputs:
+      with_s8:
+        description: "Incluir soporte Traktor Kontrol S8 (HID, LEDs y pantallas; experimental en macOS)"
+        type: boolean
+        default: true
       run_tests:
         description: "Ejecutar las pruebas RX3 tras compilar"
         type: boolean
@@ -29,6 +33,7 @@ jobs:
       RX3_BUILD_ROOT: /Users/runner/rx3-work
       RX3_BUILD_JOBS: 4
       RX3_TESTS_NONFATAL: 1
+      RX3_WITH_S8: ${{ inputs.with_s8 && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -98,6 +103,13 @@ jobs:
           done < <(find "$app" -type f -print0)
           echo "Binarios Mach-O revisados: $n"
           codesign --verify --deep --strict "$app" || { echo "::error::Firma inválida"; exit 1; }
+          if [ "$RX3_WITH_S8" = 1 ]; then
+            for f in Kontrol-S8-Mixxx-Windows-v1.0.hid.xml Kontrol-S8-Mixxx-Windows-v1.0.js \
+                     Kontrol-S8-Mixxx-Windows-v1.0.bulk.xml Kontrol-S8-Mixxx-Windows-v1.0-display.js; do
+              [ -f "$app/Contents/Resources/controllers/$f" ] || { echo "::error::Falta el mapping $f"; bad=1; }
+            done
+            echo "Mappings Kontrol S8 presentes"
+          fi
           exit $bad
 
       - name: Crear DMG
@@ -105,7 +117,8 @@ jobs:
         run: |
           version=$(cat VERSION)
           app="$RX3_BUILD_ROOT/stage/NauticMixxx.app"
-          out="$RUNNER_TEMP/NauticMixxx-$version-macOS-x64.dmg"
+          suffix=; [ "$RX3_WITH_S8" = 1 ] && suffix=-S8
+          out="$RUNNER_TEMP/NauticMixxx-$version-macOS-x64$suffix.dmg"
           root="$RUNNER_TEMP/dmg-root"; mkdir -p "$root"
           ditto "$app" "$root/NauticMixxx.app"
           ./scripts/build-app-icon-macos.sh "$RUNNER_TEMP/NauticMixxx.icns"
@@ -133,7 +146,7 @@ jobs:
       - name: Subir DMG (Artifacts)
         uses: actions/upload-artifact@v4
         with:
-          name: NauticMixxx-${{ steps.dmg.outputs.version }}-macOS-x64
+          name: NauticMixxx-${{ steps.dmg.outputs.version }}-macOS-x64${{ inputs.with_s8 && '-S8' || '' }}
           path: |
             ${{ steps.dmg.outputs.path }}
             ${{ steps.dmg.outputs.path }}.sha256
