@@ -50,7 +50,25 @@ jobs:
       - name: Compilar NauticMixxx.app (x86_64)
         run: |
           if [ "${{ inputs.run_tests }}" != "true" ]; then export RX3_SKIP_TESTS=1; fi
-          ./scripts/build-mixxx-rx3-macos.sh
+          ./scripts/build-mixxx-rx3-macos.sh 2>&1 | tee "$RUNNER_TEMP/build.log"
+
+      - name: Guardar diagnóstico del fallo (rama ci-logs)
+        if: failure()
+        run: |
+          log="$RUNNER_TEMP/build.log"
+          [ -f "$log" ] || exit 0
+          # Errores visibles como anotaciones en la página del run
+          grep -nE ' error: |^FAILED: |CMake Error|\[  FAILED  \]|ld: |Undefined symbols|No such file|fatal:|SHA-256 incorrecto|Traceback' "$log" \
+            | head -15 | sed 's/^/::error::/' || true
+          # Registro completo (últimas 4000 líneas) en la rama ci-logs para poder revisarlo
+          dir="$RUNNER_TEMP/ci-logs"; mkdir -p "$dir"; cd "$dir"
+          git init -q && git checkout -q -b ci-logs
+          tail -n 4000 "$log" > build-tail.log
+          grep -nE ' error: |^FAILED: |CMake Error|\[  FAILED  \]|ld: |Undefined symbols|fatal:|Traceback' "$log" | head -200 > errors.txt || true
+          echo "run ${{ github.run_id }} · ${{ github.sha }}" > README.txt
+          git add -A
+          git -c user.name=github-actions -c user.email=github-actions@users.noreply.github.com commit -q -m "Log de compilación del run ${{ github.run_id }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" ci-logs
 
       - name: Comprobar arquitectura y versión mínima
         run: |
