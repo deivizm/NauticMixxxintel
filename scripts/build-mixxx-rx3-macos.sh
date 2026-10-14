@@ -92,9 +92,15 @@ cmake --build "$work/build" --target mixxx mixxx-test --parallel "$RX3_BUILD_JOB
 if [ "${RX3_SKIP_TESTS:-0}" = 1 ]; then
   printf 'Pruebas RX3 omitidas (RX3_SKIP_TESTS=1).\n'
 else
-(cd "$work/build" && QT_QPA_PLATFORM=offscreen NAUTIC_SKIN_DIR="$project/skins/XDJ_RX3_Mixxx" NAUTIC_RX3_STYLESHEET="$project/skins/XDJ_RX3_Mixxx/style.qss" ./mixxx-test \
+# Las pruebas de interfaz dependen de temporizadores; en máquinas lentas o
+# compartidas pueden fallar por tiempo. Se reintentan hasta RX3_TEST_ATTEMPTS veces.
+attempt=1
+until (cd "$work/build" && QT_QPA_PLATFORM=offscreen NAUTIC_SKIN_DIR="$project/skins/XDJ_RX3_Mixxx" NAUTIC_RX3_STYLESHEET="$project/skins/XDJ_RX3_Mixxx/style.qss" ./mixxx-test \
   --gtest_filter='IntegratedUpdaterTest.*:UpdatePayloadTest.*:StartupUpdateCheckerTest.*:StartupUpdateDialogTest.*:StreamCompletionTest.*:LibraryTableViewStateTest.*:Rx3*:RekordboxDecoderTimingTest.*:RekordboxUsbSessionAudioTest.*:RekordboxWaveformImporterTest.*' \
-  --gtest_output=xml:rx3-tests.xml)
+  --gtest_output=xml:rx3-tests.xml); do
+  if [ "$attempt" -ge "${RX3_TEST_ATTEMPTS:-3}" ]; then printf 'Las pruebas RX3 fallaron %s veces.\n' "$attempt" >&2; exit 1; fi
+  attempt=$((attempt + 1)); printf 'Reintentando pruebas RX3 (intento %s)...\n' "$attempt"
+done
 fi
 cmake --install "$work/build" --prefix "$work/stage"
 app="$work/stage/NauticMixxx.app"

@@ -799,7 +799,7 @@ index 5e8f5f0..d85e390 100644
 +    for(auto* line:lines) {EXPECT_GT(line->x(),0);EXPECT_LT(line->geometry().right(),block->width()-1);}
 +    auto* load=block->findChild<QPushButton*>("ShortcutSettingsLoad");ASSERT_TRUE(load);EXPECT_TRUE(load->isEnabled());
 +    ControlObject playing(ConfigKey("[Channel1]","play"),false,false,false,1);
-+    QTest::qWait(170);EXPECT_FALSE(load->isEnabled());
++    EXPECT_TRUE(QTest::qWaitFor([&]{return !load->isEnabled();},2000));
 +    const auto output=qEnvironmentVariable("NAUTIC_RX3_RENDER_DIR");
 +    if(!output.isEmpty()) EXPECT_TRUE(canvas.grab().save(QDir(output).filePath("shortcut-usb-card.png")));
 +    qApp->setProperty("rx3SettingsUsbRoot",QString());
