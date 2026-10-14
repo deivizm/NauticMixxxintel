@@ -424,7 +424,7 @@ diff --git a/src/test/rx3display_test.cpp b/src/test/rx3display_test.cpp
 +        Rx3BrowserTestAccess::moveTools(browser,100);Rx3BrowserTestAccess::enterTools(browser);EXPECT_EQ("SOURCE",breadcrumb->text());
 +        QTimer* hold=nullptr;for(auto* timer:browser.findChildren<QTimer*>()) if(timer->isSingleShot() && timer->interval()==2000) hold=timer;
 +        ASSERT_TRUE(hold);hold->setInterval(20);
-+        QTest::mousePress(button,Qt::LeftButton);QTest::qWait(30);EXPECT_TRUE(utility->isVisible());
++        QTest::mousePress(button,Qt::LeftButton);EXPECT_TRUE(QTest::qWaitFor([&]{return utility->isVisible();},1000));
 +        QTest::mouseRelease(button,Qt::LeftButton);EXPECT_TRUE(utility->isVisible());EXPECT_EQ("UTILITY",breadcrumb->text());
 +        auto* table=utility->findChild<QTableWidget*>("RX3UtilitySettings");ASSERT_TRUE(table);
 +        QStringList categories;for(int i=0;i<table->rowCount();++i) if(table->columnSpan(i,0)==2) categories.push_back(table->item(i,0)->text());
