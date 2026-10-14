@@ -35,6 +35,9 @@ if [ -z "${RX3_BUILD_JOBS:-}" ]; then
 fi
 work=${RX3_BUILD_ROOT:-"$project/build/test-candidate/$(cat "$project/VERSION")-native-$arch"}
 mkdir -p "$work"
+# Ruta canónica (sin "..", enlaces ni /tmp→/private/tmp): fixup_bundle de CMake
+# compara rutas como texto y rechaza librerías si el prefijo no coincide.
+work=$(CDPATH= cd -- "$work" && pwd -P)
 printf 'NauticMixxx %s · %s · %s procesos\n' "$(cat "$project/VERSION")" "$arch" "$RX3_BUILD_JOBS"
 fetch() {
   if [ ! -f "$2" ]; then curl --fail --location --retry 3 "$1" -o "$2"; fi

@@ -26,7 +26,7 @@ jobs:
         shell: bash
     env:
       RX3_ARCH: x64
-      RX3_BUILD_ROOT: ${{ github.workspace }}/../rx3-work
+      RX3_BUILD_ROOT: /Users/runner/rx3-work
       RX3_BUILD_JOBS: 4
       RX3_TESTS_NONFATAL: 1
     steps:
@@ -46,9 +46,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ${{ github.workspace }}/../rx3-work/mixxx-2.5.6.tar.gz
-            ${{ github.workspace }}/../rx3-work/dependencies-x64.zip
-            ${{ github.workspace }}/../rx3-work/Sparkle-*.tar.xz
+            /Users/runner/rx3-work/mixxx-2.5.6.tar.gz
+            /Users/runner/rx3-work/dependencies-x64.zip
+            /Users/runner/rx3-work/Sparkle-*.tar.xz
           key: rx3-deps-x64-40c29ff-${{ hashFiles('scripts/sparkle-sdk.py') }}
 
       - name: Compilar NauticMixxx.app (x86_64)
@@ -65,7 +65,11 @@ jobs:
           # Pruebas fallidas (por intento) y fallos de aserción, como anotaciones legibles por API
           grep -E '^\[  FAILED  \] [A-Za-z0-9_]+\.[A-Za-z0-9_]+$' "$log" | sort | uniq -c | head -10 | sed 's/^/::warning title=Prueba fallida::/'
           grep -A3 -E 'rx3[a-z_]*test\.cpp:[0-9]+: Failure|_test\.cpp:[0-9]+: Failure' "$log" | tr '\n' ' ' | fold -w 900 | head -6 | sed 's/^/::warning title=Detalle::/'
-          grep -E ' error: |^FAILED: |CMake Error|Undefined symbols|SHA-256 incorrecto|Traceback|fatal:' "$log" | grep -v 'ld: warning' | head -8 | cut -c1-900 | sed 's/^/::error title=Compilación::/'
+          grep -E ' error: |^FAILED: |Undefined symbols|SHA-256 incorrecto|Traceback|fatal:' "$log" | grep -v 'ld: warning' | head -8 | cut -c1-900 | sed 's/^/::error title=Compilación::/'
+          # CMake Error con 30 líneas de contexto previo y 10 posteriores, en bloques de 900 caracteres
+          grep -B30 -A10 'CMake Error' "$log" | tail -60 | tr '\n' '¶' | fold -w 900 | head -8 | sed 's/^/::error title=CMake::/'
+          # Últimas 40 líneas del registro
+          tail -n 40 "$log" | tr '\n' '¶' | fold -w 900 | head -6 | sed 's/^/::warning title=Final del registro::/'
           if [ -f "$RX3_BUILD_ROOT/build/rx3-tests-failed" ]; then
             echo "::warning title=Pruebas RX3::Algunas pruebas de interfaz fallaron 3 veces en el runner sin pantalla; el DMG se genera igualmente."
           fi
@@ -73,21 +77,28 @@ jobs:
 
       - name: Comprobar arquitectura y versión mínima
         run: |
+          set +e
           app="$RX3_BUILD_ROOT/stage/NauticMixxx.app"
+          [ -d "$app" ] || { echo "::error::No existe $app"; exit 1; }
           exe="$app/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print CFBundleExecutable' "$app/Contents/Info.plist")"
-          archs=$(lipo -archs "$exe"); echo "Arquitecturas: $archs"
-          echo "$archs" | grep -q x86_64
-          minos=$(vtool -show-build "$exe" | awk '/minos/{print $2; exit}'); echo "macOS mínimo: $minos"
-          [ "${minos%%.*}" -le 12 ]
-          # Ninguna librería incluida puede exigir un macOS posterior a Monterey.
-          bad=0
-          while IFS= read -r f; do
-            if file "$f" | grep -q 'Mach-O'; then
-              m=$(vtool -arch x86_64 -show-build "$f" 2>/dev/null | awk '/minos/{print $2; exit}')
-              if [ -n "$m" ] && [ "${m%%.*}" -gt 12 ]; then echo "Requiere macOS $m: $f"; bad=1; fi
-            fi
-          done < <(find "$app" -type f)
-          [ "$bad" = 0 ]
+          archs=$(lipo -archs "$exe" 2>/dev/null); echo "Arquitecturas: $archs"
+          case " $archs " in *" x86_64 "*) ;; *) echo "::error::El ejecutable no es x86_64 ($archs)"; exit 1;; esac
+          minos_of() { vtool -arch x86_64 -show-build "$1" 2>/dev/null | awk '$1=="minos"{v=$2} END{print v}'; }
+          minos=$(minos_of "$exe"); echo "macOS mínimo del ejecutable: $minos"
+          [ -n "$minos" ] && [ "${minos%%.*}" -le 12 ] || { echo "::error::El ejecutable exige macOS $minos"; exit 1; }
+          plist_min=$(/usr/libexec/PlistBuddy -c 'Print LSMinimumSystemVersion' "$app/Contents/Info.plist" 2>/dev/null)
+          echo "LSMinimumSystemVersion: ${plist_min:-(no definido)}"
+          if [ -n "$plist_min" ] && [ "${plist_min%%.*}" -gt 12 ]; then echo "::error::Info.plist exige macOS $plist_min"; exit 1; fi
+          # Ninguna librería ni ejecutable incluido puede exigir un macOS posterior a Monterey (12).
+          bad=0; n=0
+          while IFS= read -r -d '' f; do
+            file -b "$f" | grep -q 'Mach-O' || continue
+            n=$((n+1)); m=$(minos_of "$f")
+            if [ -n "$m" ] && [ "${m%%.*}" -gt 12 ]; then echo "::error::Requiere macOS $m: ${f#$app/}"; bad=1; fi
+          done < <(find "$app" -type f -print0)
+          echo "Binarios Mach-O revisados: $n"
+          codesign --verify --deep --strict "$app" || { echo "::error::Firma inválida"; exit 1; }
+          exit $bad
 
       - name: Crear DMG
         id: dmg
@@ -98,6 +109,9 @@ jobs:
           root="$RUNNER_TEMP/dmg-root"; mkdir -p "$root"
           ditto "$app" "$root/NauticMixxx.app"
           ./scripts/build-app-icon-macos.sh "$RUNNER_TEMP/NauticMixxx.icns"
+          # hdiutil a veces falla con "Resource busy" en runners: hasta 3 intentos.
+          for try in 1 2 3; do
+          rm -f "$out"
           create-dmg \
             --skip-jenkins \
             --add-file ".DS_Store" packaging/macos/dmg-layout.dsstore 0 0 \
@@ -106,7 +120,11 @@ jobs:
             --window-pos 200 120 --window-size 600 360 --icon-size 112 \
             --icon "NauticMixxx.app" 128 180 --hide-extension "NauticMixxx.app" \
             --app-drop-link 472 180 --format UDZO \
-            "$out" "$root"
+            "$out" "$root" && break
+          echo "create-dmg falló (intento $try); reintentando..."; sleep 10
+          done
+          [ -f "$out" ] || { echo "::error::No se pudo crear el DMG"; exit 1; }
+          hdiutil verify "$out"
           (cd "$RUNNER_TEMP" && shasum -a 256 "$(basename "$out")" > "$(basename "$out").sha256")
           cat "$out.sha256"
           echo "path=$out" >> "$GITHUB_OUTPUT"
