@@ -62,6 +62,16 @@
       </WidgetGroup>
 
       <WidgetGroup><ObjectName>RX3TopbarGap</ObjectName><Size>0me,0me</Size></WidgetGroup>
+      <!-- Opens the browser without a mapped controller (also Cmd+B). The
+           browser header's DECKS button returns here. -->
+      <PushButton>
+        <ObjectName>RX3TopbarBrowse</ObjectName>
+        <Size>96f,28f</Size>
+        <NumberStates>1</NumberStates>
+        <State><Number>0</Number><Text>BROWSE</Text></State>
+        <Connection><ConfigKey>[RX3Browser],toggle_view</ConfigKey><ButtonState>LeftButton</ButtonState></Connection>
+        <Connection><ConfigKey>[Tab],library</ConfigKey><BindProperty>visible</BindProperty><Transform><Not/></Transform></Connection>
+      </PushButton>
       <WidgetGroup>
         <ObjectName>RX3TopbarStatus</ObjectName>
         <Layout>horizontal</Layout>

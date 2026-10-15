@@ -19,6 +19,12 @@ compilación (`RX3_FOLDER_USB=1`).
 para no pedir permiso pista a pista. Elegir otra vez un archivo ya añadido ofrece
 quitarlo de SOURCE (el archivo no se toca).
 
+## Abrir el navegador sin controladora compatible
+
+- Botón **BROWSE** en la barra superior de la vista de decks.
+- Botón **DECKS** en la cabecera del navegador para volver.
+- **Cmd + B** (`[RX3Browser] toggle_view`, en todos los `res/keyboard/*.kbd.cfg`).
+
 ## Solo lectura
 
 - Las pistas se cargan como temporales (`usbFolderPolicy`): no se guardan en la

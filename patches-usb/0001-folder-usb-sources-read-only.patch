@@ -20,6 +20,138 @@ index d0b0cdd..a1ab0ca 100644
      src/test/rx3display_test.cpp
      src/test/rx3beatfx_test.cpp
      src/test/soundreconfiguration_test.cpp
+diff --git a/res/keyboard/cs_CZ.kbd.cfg b/res/keyboard/cs_CZ.kbd.cfg
+index 6af18ba..61c2d00 100644
+--- a/res/keyboard/cs_CZ.kbd.cfg
++++ b/res/keyboard/cs_CZ.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+\
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/da_DK.kbd.cfg b/res/keyboard/da_DK.kbd.cfg
+index 323a094..f6ad68d 100644
+--- a/res/keyboard/da_DK.kbd.cfg
++++ b/res/keyboard/da_DK.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+<
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/de_CH.kbd.cfg b/res/keyboard/de_CH.kbd.cfg
+index 99ccb53..c3a676a 100644
+--- a/res/keyboard/de_CH.kbd.cfg
++++ b/res/keyboard/de_CH.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+<
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/de_DE.kbd.cfg b/res/keyboard/de_DE.kbd.cfg
+index 9fdb8e7..dd35563 100644
+--- a/res/keyboard/de_DE.kbd.cfg
++++ b/res/keyboard/de_DE.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+<
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/el_GR.kbd.cfg b/res/keyboard/el_GR.kbd.cfg
+index 140ce77..34056de 100644
+--- a/res/keyboard/el_GR.kbd.cfg
++++ b/res/keyboard/el_GR.kbd.cfg
+@@ -168,3 +168,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+`
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/en_US.kbd.cfg b/res/keyboard/en_US.kbd.cfg
+index 7fe1095..62d19ff 100644
+--- a/res/keyboard/en_US.kbd.cfg
++++ b/res/keyboard/en_US.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+`
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/es_ES.kbd.cfg b/res/keyboard/es_ES.kbd.cfg
+index 72423c4..c689c3b 100644
+--- a/res/keyboard/es_ES.kbd.cfg
++++ b/res/keyboard/es_ES.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+<
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/fi_FI.kbd.cfg b/res/keyboard/fi_FI.kbd.cfg
+index ea197ca..4f13073 100644
+--- a/res/keyboard/fi_FI.kbd.cfg
++++ b/res/keyboard/fi_FI.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+<
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/fr_CH.kbd.cfg b/res/keyboard/fr_CH.kbd.cfg
+index d3831ae..d05ee15 100644
+--- a/res/keyboard/fr_CH.kbd.cfg
++++ b/res/keyboard/fr_CH.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+<
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/fr_FR.kbd.cfg b/res/keyboard/fr_FR.kbd.cfg
+index eb1a5ba..ceb63f9 100644
+--- a/res/keyboard/fr_FR.kbd.cfg
++++ b/res/keyboard/fr_FR.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+`
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/it_IT.kbd.cfg b/res/keyboard/it_IT.kbd.cfg
+index 9ef866e..146c57a 100644
+--- a/res/keyboard/it_IT.kbd.cfg
++++ b/res/keyboard/it_IT.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+<
++
++[RX3Browser]
++toggle_view Ctrl+b
+diff --git a/res/keyboard/ru_RU.kbd.cfg b/res/keyboard/ru_RU.kbd.cfg
+index beda6b6..9b26b74 100644
+--- a/res/keyboard/ru_RU.kbd.cfg
++++ b/res/keyboard/ru_RU.kbd.cfg
+@@ -163,3 +163,6 @@ OptionsMenu_DeveloperStatsExperiment Ctrl+Shift+E
+ OptionsMenu_DeveloperStatsBase Ctrl+Shift+B
+ DeveloperMenu_EnableDebugger Ctrl+Shift+D
+ OptionsMenu_EnableShortcuts Ctrl+|
++
++[RX3Browser]
++toggle_view Ctrl+b
 diff --git a/src/library/browse/browsetablemodel.cpp b/src/library/browse/browsetablemodel.cpp
 index 1d69cd1..de28f5e 100644
 --- a/src/library/browse/browsetablemodel.cpp
@@ -60,10 +192,27 @@ index 1d69cd1..de28f5e 100644
  
  TrackPointer BrowseTableModel::getTrackByRef(const TrackRef& trackRef) const {
 diff --git a/src/library/library.cpp b/src/library/library.cpp
-index fe961a6..70a0fc6 100644
+index fe961a6..8e39331 100644
 --- a/src/library/library.cpp
 +++ b/src/library/library.cpp
-@@ -262,7 +262,7 @@ Library::~Library() = default;
+@@ -31,6 +31,7 @@
+ #include "library/trackset/playlistfeature.h"
+ #include "library/trackset/setlogfeature.h"
+ #include "library/traktor/traktorfeature.h"
++#include "control/controlpushbutton.h"
+ #include "mixer/playermanager.h"
+ #include "moc_library.cpp"
+ #include "util/assert.h"
+@@ -256,13 +257,16 @@ Library::Library(
+     m_editMetadataSelectedClick = m_pConfig->getValue(
+             kEditMetadataSelectedClickConfigKey,
+             kEditMetadataSelectedClickDefault);
++
++    m_pRx3ToggleView = std::make_unique<ControlPushButton>(
++            ConfigKey(QStringLiteral("[RX3Browser]"), QStringLiteral("toggle_view")));
+ }
+ 
+ Library::~Library() = default;
  
  bool Library::showUsbFolder(const QString& root, const QString& path) {
      auto* feature=rekordboxFeature();
@@ -71,6 +220,37 @@ index fe961a6..70a0fc6 100644
 +    return feature && (feature->catalogForRoot(root) || feature->isFolderOnlyRoot(root)) &&
              m_pBrowseFeature->showUsbFolder(root,path);
  }
+ 
+diff --git a/src/library/library.h b/src/library/library.h
+index 735b412..281a176 100644
+--- a/src/library/library.h
++++ b/src/library/library.h
+@@ -1,5 +1,7 @@
+ #pragma once
+ 
++#include <memory>
++
+ #include <QFont>
+ #include <QList>
+ #include <QObject>
+@@ -18,6 +20,7 @@
+ class AnalysisFeature;
+ class BrowseFeature;
+ class ControlObject;
++class ControlPushButton;
+ class CrateFeature;
+ class LibraryControl;
+ class LibraryFeature;
+@@ -160,6 +163,10 @@ class Library: public QObject {
+       void onPlayerManagerTrackAnalyzerIdle();
+ 
+   private:
++    // [RX3Browser],toggle_view: opens the RX3 browser or returns to the decks.
++    // Created here, before the skin, so skin buttons and the keyboard mapping
++    // bind to it without a hardware controller.
++    std::unique_ptr<ControlPushButton> m_pRx3ToggleView;
+     rx3::BrowserPlaybackState* m_browserPlaybackState{nullptr};
+     const UserSettingsPointer m_pConfig;
  
 diff --git a/src/library/library_prefs.cpp b/src/library/library_prefs.cpp
 index 5da82de..647dd48 100644
@@ -2836,10 +3016,36 @@ index ee16bad..ebd7a57 100644
          return "Select a connected rekordbox USB in SOURCE first.";
      if(color<0 || color>=sourceColorNames().size()) return "Unsupported background color.";
 diff --git a/src/widget/wrx3browser.h b/src/widget/wrx3browser.h
-index fe5a9da..f624e45 100644
+index fe5a9da..47310f0 100644
 --- a/src/widget/wrx3browser.h
 +++ b/src/widget/wrx3browser.h
-@@ -365,7 +365,13 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -168,6 +168,10 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+         m_search = new QLineEdit(header); m_search->setPlaceholderText("SEARCH"); m_search->hide(); detailRow->addWidget(m_search,1);
+         m_searchCount=new QLabel("0",header);m_searchCount->setObjectName("RX3SearchCount");m_searchCount->hide();detailRow->addWidget(m_searchCount);
+         m_infoButton = new QPushButton("◀  INFO", header);h->addWidget(m_infoButton);m_headerButtons.push_back(m_infoButton);
++        auto* decks=new QPushButton("DECKS", header);decks->setObjectName("RX3DecksButton");
++        decks->setToolTip("Back to the decks (Cmd+B)");decks->setAccessibleName("Back to the decks");
++        h->addWidget(decks);m_headerButtons.push_back(decks);
++        connect(decks,&QPushButton::clicked,this,[this]{showDecks();});
+         layout->addWidget(header);
+         m_pages = new QStackedWidget(this); layout->addWidget(m_pages, 1);
+         auto* browse = new QWidget(m_pages); auto* b = new QHBoxLayout(browse);
+@@ -320,6 +324,14 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+             showSources();
+         } });
+         makeControl("open", [this](double value){ if(value > 0) openBrowser(); });
++        // Mouse / keyboard access without a mapped controller (Cmd+B, skin
++        // BROWSE button, DECKS button in this header).
++        auto* toggleView=new ControlProxy("[RX3Browser]","toggle_view",this,ControlFlag::NoAssertIfMissing);
++        toggleView->connectValueChanged(this,[this](double value){
++            if(value<=0) return;
++            if(qRound(ControlObject::get(ConfigKey("[Tab]","current")))==1) showDecks();
++            else openBrowser();
++        });
+         makeControl("tools",[this](double value){if(value>0) showTools();});
+         makeControl("utility",[this](double value){if(value>0) {if(m_pages->currentWidget()==m_utility) closeUtility();else showUtility();}});
+         makeControl("browse",[this](double value){if(value>0) browseSelectedSource();});
+@@ -365,7 +377,13 @@ class WRx3Browser : public QWidget, public WBaseWidget {
          });
      }
      ~WRx3Browser() override = default;
@@ -2854,7 +3060,7 @@ index fe5a9da..f624e45 100644
      Rx3TrackInfoPanel* detailedInfo() const {return m_detailedInfo;}
      bool canShowInfo() const {return m_pages->currentIndex()==0 && m_level==BrowserLevel::Tracks;}
      void showTrackInfo(bool show) {
-@@ -550,6 +556,11 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -550,6 +568,11 @@ class WRx3Browser : public QWidget, public WBaseWidget {
      }
      void openSearch() {
          if(!deviceReady(m_selectedDevice)) {showSources();return;}
@@ -2866,7 +3072,19 @@ index fe5a9da..f624e45 100644
          m_selectedCategory="SEARCH";m_search->clear();
          m_searchHasAllTracks=false;
          m_backend->rekordboxFeature()->showTrackIds(m_currentRoot,{},"search");showTrackList(BrowserLevel::Categories);
-@@ -599,6 +610,12 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -571,6 +594,11 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+         connect(ptr, &ControlObject::valueChanged, this, [handler](double value){handler(value);});
+         m_controls.push_back(std::move(control)); return ptr;
+     }
++    void showDecks() {
++        if(m_detailedInfo && m_detailedInfo->isVisible()) ControlObject::set(ConfigKey("[RX3Info]","visible"),0);
++        if(m_keyboard) m_keyboard->hide();
++        ControlObject::set(ConfigKey(QStringLiteral("[Tab]"),QStringLiteral("current")),0.0);
++    }
+     static void showBrowser() {
+         // The RX3 skin's page 1 is the browser. Navigation controls own only
+         // presentation state and never load, import or persist a track.
+@@ -599,6 +627,12 @@ class WRx3Browser : public QWidget, public WBaseWidget {
                  ? m_categoryIds.at(m_categories->currentRow()) : quint16(0);
          m_categories->clear();m_categoryIds.clear();
          if(!m_selectedDevice.isValid()) {showSources();return;}
@@ -2879,7 +3097,7 @@ index fe5a9da..f624e45 100644
          const auto currentCatalog=catalog();
          if(deviceStatus(m_selectedDevice)!="ready" || !currentCatalog) return;
          const auto menu=currentCatalog->browseMenu();
-@@ -816,7 +833,8 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -816,7 +850,8 @@ class WRx3Browser : public QWidget, public WBaseWidget {
      void selectCategory(int row) {
          if(m_detailedInfo->isVisible()) ControlObject::set(ConfigKey("[RX3Info]","visible"),0);
          if(row<0 || row>=m_categoryIds.size() || !m_selectedDevice.isValid()) return;
@@ -2889,7 +3107,7 @@ index fe5a9da..f624e45 100644
              showSources();
              return;
          }
-@@ -1037,8 +1055,15 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -1037,8 +1072,15 @@ class WRx3Browser : public QWidget, public WBaseWidget {
      QString deviceStatus(const QPersistentModelIndex& device) const {
          return device.data(SidebarModel::DataRole).toList().value(2).toString();
      }
@@ -2905,7 +3123,7 @@ index fe5a9da..f624e45 100644
          auto* feature=m_backend?m_backend->rekordboxFeature():nullptr;
          const auto currentCatalog=feature ? feature->catalogForRoot(deviceRoot(device)) : nullptr;
          return currentCatalog && !currentCatalog->browseMenu().categories.isEmpty();
-@@ -1137,7 +1162,7 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -1137,7 +1179,7 @@ class WRx3Browser : public QWidget, public WBaseWidget {
          m_sources->viewport()->update();
          const auto root=m_pages->currentIndex()==1?deviceRoot(sourceDeviceForNavigation()):m_currentRoot;
          const auto color=rx3::sourceColor(rx3::readSourceColor(root)).name();
@@ -2914,7 +3132,7 @@ index fe5a9da..f624e45 100644
          m_sourceLabel->setStyleSheet("background:"+color+";color:white;padding:8px;font-size:16px;");
          m_sourceLabel->setVisible(m_pages->currentIndex()!=1 && m_pages->currentWidget()!=m_tools &&
                  m_pages->currentWidget()!=m_utility && !root.isEmpty());
-@@ -1195,8 +1220,21 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -1195,8 +1237,21 @@ class WRx3Browser : public QWidget, public WBaseWidget {
          for(auto it=m_usbSlots.begin();it!=m_usbSlots.end();) {
              if(!present.contains(it.key())) it=m_usbSlots.erase(it);else ++it;
          }
@@ -2936,7 +3154,7 @@ index fe5a9da..f624e45 100644
              if(!m_usbSlots.contains(root)) {
                  int slot=1;while(m_usbSlots.values().contains(slot)) ++slot;
                  m_usbSlots.insert(root,slot);
-@@ -1212,7 +1250,17 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -1212,7 +1267,17 @@ class WRx3Browser : public QWidget, public WBaseWidget {
              auto* empty=new QTreeWidgetItem(m_sources,{"NO DEVICE"});
              empty->setFlags(Qt::NoItemFlags);
          }
@@ -2955,7 +3173,7 @@ index fe5a9da..f624e45 100644
          m_sources->setCurrentItem(m_sources->topLevelItem(selected));
          m_refreshingSources=false;
          updateSourceInfo(selected);
-@@ -1223,36 +1271,61 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -1223,36 +1288,61 @@ class WRx3Browser : public QWidget, public WBaseWidget {
          if(row>=0 && row<int(m_devices.size()) && deviceReady(m_devices[row])) {
              const auto root=deviceRoot(m_devices[row]);
              qApp->setProperty("rx3SettingsUsbRoot",root);
@@ -3027,7 +3245,7 @@ index fe5a9da..f624e45 100644
          const int row=m_sources->indexOfTopLevelItem(m_sources->currentItem());
          if(row<0 || row>=int(m_devices.size())) return;
          const QModelIndex device=m_devices[row];
-@@ -1260,7 +1333,7 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -1260,7 +1350,7 @@ class WRx3Browser : public QWidget, public WBaseWidget {
          m_selectedDevice=device;
          m_currentRoot=deviceRoot(m_selectedDevice);
          qApp->setProperty("rx3SettingsUsbRoot",m_currentRoot);
@@ -3036,7 +3254,7 @@ index fe5a9da..f624e45 100644
          qApp->setProperty("rx3SettingsUsbDeviceName",m_selectedDevice.data(Qt::DisplayRole).toString());
          m_pages->setCurrentIndex(0);
          m_source->setText("SOURCE");m_facets->hide();m_sidebar->hide();
-@@ -1477,6 +1550,8 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -1477,6 +1567,8 @@ class WRx3Browser : public QWidget, public WBaseWidget {
      QString m_selectedCategory;
      bool m_refreshingSources=false;
      QString m_currentRoot;
