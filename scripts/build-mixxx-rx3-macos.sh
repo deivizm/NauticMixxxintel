@@ -36,8 +36,9 @@ fi
 # RX3_WITH_S8=1 añade el soporte Kontrol S8 (HID + pantallas) de patches-s8/.
 with_s8=${RX3_WITH_S8:-0}
 s8_suffix=; [ "$with_s8" = 1 ] && s8_suffix=-s8
-# RX3_FOLDER_USB=1 (por defecto) muestra en SOURCE los USB sin exportación de
-# rekordbox, navegables por FOLDER y siempre en solo lectura (patches-usb/).
+# RX3_FOLDER_USB=1 (por defecto) añade a SOURCE, siempre en solo lectura
+# (patches-usb/): USB sin exportación de rekordbox (FOLDER), USB con playlists
+# de Traktor (.nml) o rekordbox XML, y bibliotecas Traktor / rekordbox XML del Mac.
 folder_usb=${RX3_FOLDER_USB:-1}
 [ "$folder_usb" = 1 ] && s8_suffix="$s8_suffix-usb"
 work=${RX3_BUILD_ROOT:-"$project/build/test-candidate/$(cat "$project/VERSION")-native-$arch$s8_suffix"}
@@ -120,7 +121,7 @@ else
 # Las pruebas de interfaz dependen de temporizadores; en máquinas lentas o
 # compartidas pueden fallar por tiempo. Se reintentan hasta RX3_TEST_ATTEMPTS veces.
 s8_tests=; [ "$with_s8" = 1 ] && s8_tests=':S8Bridge289Test.*:LoopingControlTest.BeatjumpBackwardAtStartNeverSeeksBeforeTrack'
-# Rx3FolderUsbTest.* ya entra en el filtro Rx3*.
+# Rx3FolderUsbTest.*, Rx3ExternalCatalogTest.* y Rx3ExternalTrackTest.* entran en Rx3*.
 attempt=1
 until (cd "$work/build" && QT_QPA_PLATFORM=offscreen NAUTIC_SKIN_DIR="$project/skins/XDJ_RX3_Mixxx" NAUTIC_RX3_STYLESHEET="$project/skins/XDJ_RX3_Mixxx/style.qss" ./mixxx-test \
   --gtest_filter="IntegratedUpdaterTest.*:UpdatePayloadTest.*:StartupUpdateCheckerTest.*:StartupUpdateDialogTest.*:StreamCompletionTest.*:LibraryTableViewStateTest.*:Rx3*:RekordboxDecoderTimingTest.*:RekordboxUsbSessionAudioTest.*:RekordboxWaveformImporterTest.*$s8_tests" \

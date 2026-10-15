@@ -10,7 +10,7 @@ on:
         type: boolean
         default: true
       folder_usb:
-        description: "Leer USB sin rekordbox (navegación FOLDER, solo lectura)"
+        description: "Fuentes de solo lectura: USB sin rekordbox, Traktor (NML) y rekordbox XML"
         type: boolean
         default: true
       run_tests:

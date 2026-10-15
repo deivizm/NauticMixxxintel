@@ -1,15 +1,64 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index d0b0cdd..1e2e7cf 100644
+index d0b0cdd..a1ab0ca 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -2142,6 +2142,7 @@ if(BUILD_TESTING)
+@@ -1006,6 +1006,7 @@ add_library(mixxx-lib STATIC EXCLUDE_FROM_ALL
+   src/library/rekordbox/rekordboxmetadata.cpp
+   src/library/rekordbox/rekordboxdatabase.cpp
+   src/library/rekordbox/rekordboxdevice.cpp
++  src/library/rekordbox/externalcatalog.cpp
+   src/library/rekordbox/rekordboxusbsession.cpp
+   src/library/rekordbox/rekordboxanlzreader.cpp
+   src/library/rekordbox/rekordboxtrackadapter.cpp
+@@ -2142,6 +2143,9 @@ if(BUILD_TESTING)
      src/test/rekordboxruntimecatalog_test.cpp
      src/test/rekordboxdatabase_test.cpp
      src/test/rekordboxdevice_test.cpp
 +    src/test/rx3folderusb_test.cpp
++    src/test/rx3externalcatalog_test.cpp
++    src/test/rx3externaltrack_test.cpp
      src/test/rx3display_test.cpp
      src/test/rx3beatfx_test.cpp
      src/test/soundreconfiguration_test.cpp
+diff --git a/src/library/browse/browsetablemodel.cpp b/src/library/browse/browsetablemodel.cpp
+index 1d69cd1..de28f5e 100644
+--- a/src/library/browse/browsetablemodel.cpp
++++ b/src/library/browse/browsetablemodel.cpp
+@@ -216,7 +216,33 @@ void BrowseTableModel::setPath(mixxx::FileAccess path) {
+ }
+ 
+ TrackPointer BrowseTableModel::getTrack(const QModelIndex& index) const {
+-    return getTrackByRef(TrackRef::fromFilePath(getTrackLocation(index)));
++    auto pTrack = getTrackByRef(TrackRef::fromFilePath(getTrackLocation(index)));
++    if (pTrack && !m_transientUsbRoot.isEmpty()) {
++        // Read-only USB folder tracks never import tags into a Track. Show the
++        // tags this view already read (in memory only; BPM and beats are left
++        // to the analyzer so the grid stays aligned).
++        const auto text = [&](int column) {
++            return index.sibling(index.row(), column).data().toString().trimmed();
++        };
++        const auto title = text(COLUMN_TITLE);
++        if (!title.isEmpty()) {
++            pTrack->setTitle(title);
++        }
++        pTrack->setArtist(text(COLUMN_ARTIST));
++        pTrack->setAlbum(text(COLUMN_ALBUM));
++        pTrack->setAlbumArtist(text(COLUMN_ALBUMARTIST));
++        pTrack->setYear(text(COLUMN_YEAR));
++        pTrack->setComposer(text(COLUMN_COMPOSER));
++        pTrack->setComment(text(COLUMN_COMMENT));
++        pTrack->setTrackNumber(text(COLUMN_TRACK_NUMBER));
++        pTrack->updateGenre(text(COLUMN_GENRE));
++        const auto key = text(COLUMN_KEY);
++        if (!key.isEmpty()) {
++            pTrack->setKeyText(key, mixxx::track::io::key::FILE_METADATA);
++        }
++        pTrack->markClean();
++    }
++    return pTrack;
+ }
+ 
+ TrackPointer BrowseTableModel::getTrackByRef(const TrackRef& trackRef) const {
 diff --git a/src/library/library.cpp b/src/library/library.cpp
 index fe961a6..70a0fc6 100644
 --- a/src/library/library.cpp
@@ -24,10 +73,10 @@ index fe961a6..70a0fc6 100644
  }
  
 diff --git a/src/library/library_prefs.cpp b/src/library/library_prefs.cpp
-index 5da82de..8b2a6da 100644
+index 5da82de..647dd48 100644
 --- a/src/library/library_prefs.cpp
 +++ b/src/library/library_prefs.cpp
-@@ -23,6 +23,11 @@ const ConfigKey mixxx::library::prefs::kUsbOnlyModeConfigKey =
+@@ -23,6 +23,16 @@ const ConfigKey mixxx::library::prefs::kUsbOnlyModeConfigKey =
                  mixxx::library::prefs::kConfigGroup,
                  QStringLiteral("UsbOnlyMode")};
  
@@ -36,14 +85,19 @@ index 5da82de..8b2a6da 100644
 +                mixxx::library::prefs::kConfigGroup,
 +                QStringLiteral("FolderUsbSources")};
 +
++const ConfigKey mixxx::library::prefs::kExternalLibrarySourcesConfigKey =
++        ConfigKey{
++                mixxx::library::prefs::kConfigGroup,
++                QStringLiteral("ExternalLibrarySources")};
++
  const ConfigKey mixxx::library::prefs::kKeyNotationConfigKey =
          ConfigKey{
                  mixxx::library::prefs::kConfigGroup,
 diff --git a/src/library/library_prefs.h b/src/library/library_prefs.h
-index fa6cafe..9ea7d29 100644
+index fa6cafe..9ca405e 100644
 --- a/src/library/library_prefs.h
 +++ b/src/library/library_prefs.h
-@@ -16,6 +16,10 @@ extern const ConfigKey kRescanOnStartupConfigKey;
+@@ -16,6 +16,14 @@ extern const ConfigKey kRescanOnStartupConfigKey;
  
  extern const ConfigKey kUsbOnlyModeConfigKey;
  
@@ -51,11 +105,993 @@ index fa6cafe..9ea7d29 100644
 +// always read-only). Enabled unless explicitly set to 0.
 +extern const ConfigKey kFolderUsbSourcesConfigKey;
 +
++// Show Traktor (NML) and rekordbox XML libraries in SOURCE, read-only.
++// Enabled unless explicitly set to 0.
++extern const ConfigKey kExternalLibrarySourcesConfigKey;
++
  extern const ConfigKey kKeyNotationConfigKey;
  
  extern const ConfigKey kTrackDoubleClickActionConfigKey;
+diff --git a/src/library/rekordbox/externalcatalog.cpp b/src/library/rekordbox/externalcatalog.cpp
+new file mode 100644
+index 0000000..b70a84f
+--- /dev/null
++++ b/src/library/rekordbox/externalcatalog.cpp
+@@ -0,0 +1,906 @@
++#include "library/rekordbox/externalcatalog.h"
++
++#include <QCryptographicHash>
++#include <QDateTime>
++#include <QDir>
++#include <QDirIterator>
++#include <QFile>
++#include <QFileInfo>
++#include <QHash>
++#include <QPair>
++#include <QSet>
++#include <QUrl>
++#include <QVersionNumber>
++#include <QXmlStreamReader>
++
++#include <algorithm>
++#include <cmath>
++#include <utility>
++
++namespace mixxx::rekordbox {
++namespace {
++
++// Resource bounds, not format restrictions.
++constexpr qint64 kMaxCatalogBytes = 256LL * 1024 * 1024;
++constexpr int kMaxTracks = 250000;
++constexpr int kMaxPlaylistDepth = 32;
++constexpr int kMaxPlaylistNodes = 50000;
++constexpr int kMaxGeneratedBeats = 20000;
++
++struct ParsedTrack {
++    RuntimeTrack track;
++    QStringList lookupKeys; // file-local identities used by playlists
++};
++
++struct ParsedNode {
++    QString name;
++    bool isFolder{false};
++    QList<ParsedNode> children;
++    QStringList entryKeys;
++};
++
++struct ParsedFile {
++    QList<ParsedTrack> tracks;
++    QList<ParsedNode> roots;
++    QString error;
++};
++
++bool fileExists(const ExternalCatalogOptions& options, const QString& path) {
++    if (path.isEmpty()) {
++        return false;
++    }
++    return options.fileExists ? options.fileExists(path) : QFileInfo::exists(path);
++}
++
++QString firstExisting(const QStringList& candidates, const ExternalCatalogOptions& options) {
++    for (const auto& candidate : candidates) {
++        if (!candidate.isEmpty() && fileExists(options, candidate)) {
++            return QDir::cleanPath(candidate);
++        }
++    }
++    return {};
++}
++
++quint32 ratingFrom255(int value) {
++    return static_cast<quint32>(qBound(0, (value + 25) / 51, 5));
++}
++
++bool isSkippedSystemName(const QString& name) {
++    return name.startsWith(QChar('.')) ||
++            name.compare(QStringLiteral("System Volume Information"), Qt::CaseInsensitive) == 0 ||
++            name.compare(QStringLiteral("$RECYCLE.BIN"), Qt::CaseInsensitive) == 0;
++}
++
++// --- Traktor -----------------------------------------------------------------
++
++QString traktorRelativePath(const QString& dir, const QString& file) {
++    QString path = dir;
++    path.replace(QStringLiteral("/:"), QStringLiteral("/"));
++    if (!path.startsWith(QChar('/'))) {
++        path.prepend(QChar('/'));
++    }
++    if (!path.endsWith(QChar('/'))) {
++        path.append(QChar('/'));
++    }
++    return path + file;
++}
++
++QString resolveTraktorLocation(const QString& volume,
++        const QString& dir,
++        const QString& file,
++        const ExternalCatalogOptions& options) {
++    if (file.isEmpty()) {
++        return {};
++    }
++    const QString relative = traktorRelativePath(dir, file);
++    QStringList candidates;
++    if (!options.volumeRoot.isEmpty()) {
++        candidates.append(options.volumeRoot + relative);
++    }
++#if defined(Q_OS_WIN)
++    if (!volume.isEmpty()) {
++        candidates.append(volume + relative);
++    }
++#else
++    if (!volume.isEmpty()) {
++        candidates.append(QStringLiteral("/Volumes/") + volume + relative);
++    }
++    candidates.append(relative);
++#endif
++    return firstExisting(candidates, options);
++}
++
++void appendTraktorCue(RuntimeTrack* track,
++        QList<RuntimeCue>* loadCues,
++        const QXmlStreamAttributes& attributes,
++        std::optional<double>* gridMs) {
++    bool ok = false;
++    const int type = attributes.value(QStringLiteral("TYPE")).toInt(&ok);
++    if (!ok) {
++        return;
++    }
++    const double start = attributes.value(QStringLiteral("START")).toDouble(&ok);
++    if (!ok || !std::isfinite(start)) {
++        return;
++    }
++    const double length = attributes.value(QStringLiteral("LEN")).toDouble();
++    const int hotcue = attributes.value(QStringLiteral("HOTCUE")).toInt(&ok);
++    const int slot = ok && hotcue >= 0 && hotcue < 8 ? hotcue + 1 : -1;
++    QString name = attributes.value(QStringLiteral("NAME")).toString();
++    if (name == QStringLiteral("n.n.")) {
++        name.clear();
++    }
++    if (type == 4) { // Grid marker: beatgrid anchor, never a cue.
++        if (!*gridMs) {
++            *gridMs = start;
++        }
++        return;
++    }
++    RuntimeCue cue;
++    cue.label = name;
++    cue.startMs = std::max(0.0, start);
++    if (type == 5) { // Loop
++        if (!(length > 0) || !std::isfinite(length)) {
++            return;
++        }
++        cue.endMs = *cue.startMs + length;
++        cue.kind = slot > 0 ? RuntimeCue::Kind::HotLoop : RuntimeCue::Kind::MemoryLoop;
++    } else { // Cue, fade in/out, load
++        cue.kind = slot > 0 ? RuntimeCue::Kind::HotCue : RuntimeCue::Kind::MemoryCue;
++    }
++    cue.hotcueIndex = slot;
++    if (type == 3) {
++        // The load marker becomes the main cue (first memory cue).
++        RuntimeCue load = cue;
++        load.kind = RuntimeCue::Kind::MemoryCue;
++        load.hotcueIndex = -1;
++        load.endMs.reset();
++        loadCues->append(load);
++        if (slot <= 0) {
++            return;
++        }
++    }
++    track->cues.append(cue);
++}
++
++ParsedTrack parseTraktorEntry(QXmlStreamReader& xml, const ExternalCatalogOptions& options) {
++    ParsedTrack parsed;
++    auto& track = parsed.track;
++    const auto entry = xml.attributes();
++    track.title = entry.value(QStringLiteral("TITLE")).toString();
++    track.artist = entry.value(QStringLiteral("ARTIST")).toString();
++    QString volume, dir, file;
++    std::optional<double> gridMs;
++    std::optional<int> musicalKey;
++    QList<RuntimeCue> loadCues;
++    while (!xml.atEnd()) {
++        const auto token = xml.readNext();
++        if (token == QXmlStreamReader::EndElement &&
++                xml.name() == QStringLiteral("ENTRY")) {
++            break;
++        }
++        if (token != QXmlStreamReader::StartElement) {
++            continue;
++        }
++        const auto name = xml.name();
++        const auto attributes = xml.attributes();
++        if (name == QStringLiteral("LOCATION")) {
++            volume = attributes.value(QStringLiteral("VOLUME")).toString();
++            dir = attributes.value(QStringLiteral("DIR")).toString();
++            file = attributes.value(QStringLiteral("FILE")).toString();
++        } else if (name == QStringLiteral("ALBUM")) {
++            track.album = attributes.value(QStringLiteral("TITLE")).toString();
++        } else if (name == QStringLiteral("INFO")) {
++            track.genre = attributes.value(QStringLiteral("GENRE")).toString();
++            track.comment = attributes.value(QStringLiteral("COMMENT")).toString();
++            track.key = attributes.value(QStringLiteral("KEY")).toString();
++            bool ok = false;
++            const int playtime = attributes.value(QStringLiteral("PLAYTIME")).toInt(&ok);
++            if (ok && playtime > 0) {
++                track.durationSeconds = static_cast<quint32>(playtime);
++            }
++            const int ranking = attributes.value(QStringLiteral("RANKING")).toInt(&ok);
++            if (ok) {
++                track.rating = ratingFrom255(ranking);
++            }
++            for (const auto& field : {QStringLiteral("LABEL"), QStringLiteral("REMIXER")}) {
++                const auto value = attributes.value(field).toString();
++                if (!value.isEmpty()) {
++                    track.rawMetadata.insert(field.toLower(), value);
++                }
++            }
++            const auto released = attributes.value(QStringLiteral("RELEASE_DATE")).toString();
++            if (released.size() >= 4 && released.left(4).toInt() > 0) {
++                track.rawMetadata.insert(QStringLiteral("year"), released.left(4));
++            }
++            const auto imported = attributes.value(QStringLiteral("IMPORT_DATE")).toString();
++            if (!imported.isEmpty()) {
++                track.rawMetadata.insert(QStringLiteral("date_added"),
++                        QString(imported).replace(QChar('/'), QChar('-')));
++            }
++        } else if (name == QStringLiteral("TEMPO")) {
++            bool ok = false;
++            const double bpm = attributes.value(QStringLiteral("BPM")).toDouble(&ok);
++            if (ok && bpm > 0 && bpm < 1000) {
++                track.bpm = bpm;
++            }
++        } else if (name == QStringLiteral("MUSICAL_KEY")) {
++            bool ok = false;
++            const int value = attributes.value(QStringLiteral("VALUE")).toInt(&ok);
++            if (ok) {
++                musicalKey = value;
++            }
++        } else if (name == QStringLiteral("CUE_V2")) {
++            appendTraktorCue(&track, &loadCues, attributes, &gridMs);
++        }
++    }
++    if (track.key.isEmpty() && musicalKey) {
++        track.key = traktorMusicalKeyText(*musicalKey);
++    }
++    // Main cue first, then the remaining cues in file order.
++    track.cues = loadCues + track.cues;
++    if (track.bpm && gridMs) {
++        track.rawMetadata.insert(QStringLiteral("grid_bpm"), *track.bpm);
++        track.rawMetadata.insert(QStringLiteral("grid_ms"), *gridMs);
++    }
++    track.rawMetadata.insert(QStringLiteral("provider"), QStringLiteral("traktor"));
++    track.resolvedAudioPath = resolveTraktorLocation(volume, dir, file, options);
++    if (track.title.isEmpty()) {
++        track.title = QFileInfo(file).completeBaseName();
++    }
++    parsed.lookupKeys.append(volume + dir + file);
++    return parsed;
++}
++
++ParsedNode parseTraktorNode(QXmlStreamReader& xml, int depth, int* nodeCount, bool* valid) {
++    ParsedNode node;
++    const auto type = xml.attributes().value(QStringLiteral("TYPE")).toString();
++    node.name = xml.attributes().value(QStringLiteral("NAME")).toString();
++    node.isFolder = type == QStringLiteral("FOLDER");
++    *valid = node.isFolder || type == QStringLiteral("PLAYLIST");
++    if (++*nodeCount > kMaxPlaylistNodes || depth > kMaxPlaylistDepth) {
++        *valid = false;
++        xml.skipCurrentElement();
++        return node;
++    }
++    while (!xml.atEnd()) {
++        const auto token = xml.readNext();
++        if (token == QXmlStreamReader::EndElement && xml.name() == QStringLiteral("NODE")) {
++            break;
++        }
++        if (token != QXmlStreamReader::StartElement) {
++            continue;
++        }
++        if (xml.name() == QStringLiteral("NODE")) {
++            bool childValid = false;
++            auto child = parseTraktorNode(xml, depth + 1, nodeCount, &childValid);
++            if (childValid && node.isFolder) {
++                node.children.append(std::move(child));
++            }
++        } else if (xml.name() == QStringLiteral("PRIMARYKEY") &&
++                xml.attributes().value(QStringLiteral("TYPE")) == QStringLiteral("TRACK")) {
++            node.entryKeys.append(xml.attributes().value(QStringLiteral("KEY")).toString());
++        }
++    }
++    return node;
++}
++
++ParsedFile parseTraktor(QXmlStreamReader& xml, const ExternalCatalogOptions& options) {
++    ParsedFile result;
++    bool inCollection = false;
++    int nodeCount = 0;
++    while (!xml.atEnd()) {
++        const auto token = xml.readNext();
++        if (token == QXmlStreamReader::EndElement && xml.name() == QStringLiteral("COLLECTION")) {
++            inCollection = false;
++            continue;
++        }
++        if (token != QXmlStreamReader::StartElement) {
++            continue;
++        }
++        if (xml.name() == QStringLiteral("COLLECTION")) {
++            inCollection = true;
++        } else if (inCollection && xml.name() == QStringLiteral("ENTRY")) {
++            if (result.tracks.size() >= kMaxTracks) {
++                result.error = QStringLiteral("Too many tracks");
++                return result;
++            }
++            result.tracks.append(parseTraktorEntry(xml, options));
++        } else if (xml.name() == QStringLiteral("PLAYLISTS")) {
++            while (!xml.atEnd()) {
++                const auto inner = xml.readNext();
++                if (inner == QXmlStreamReader::EndElement &&
++                        xml.name() == QStringLiteral("PLAYLISTS")) {
++                    break;
++                }
++                if (inner == QXmlStreamReader::StartElement && xml.name() == QStringLiteral("NODE")) {
++                    bool valid = false;
++                    auto root = parseTraktorNode(xml, 0, &nodeCount, &valid);
++                    if (!valid) {
++                        continue;
++                    }
++                    // "$ROOT" is Traktor's invisible top folder.
++                    if (root.isFolder && root.name == QStringLiteral("$ROOT")) {
++                        result.roots.append(root.children);
++                    } else {
++                        result.roots.append(std::move(root));
++                    }
++                }
++            }
++        }
++    }
++    return result;
++}
++
++// --- rekordbox XML -------------------------------------------------------------
++
++QString localPathFromRekordboxLocation(const QString& location) {
++    QString path = location;
++    for (const auto& prefix : {QStringLiteral("file://localhost"), QStringLiteral("file://")}) {
++        if (path.startsWith(prefix, Qt::CaseInsensitive)) {
++            path = path.mid(prefix.size());
++            break;
++        }
++    }
++    path = QUrl::fromPercentEncoding(path.toUtf8());
++    // "/C:/Music/x.mp3" from a Windows export.
++    if (path.size() > 3 && path.at(0) == QChar('/') && path.at(2) == QChar(':')) {
++        path = path.mid(1);
++    }
++    return path;
++}
++
++QString resolveRekordboxLocation(const QString& location, const ExternalCatalogOptions& options) {
++    const QString path = localPathFromRekordboxLocation(location);
++    if (path.isEmpty()) {
++        return {};
++    }
++    QStringList candidates{path};
++    if (!options.volumeRoot.isEmpty()) {
++        // The XML may come from another computer or mount point: try the same
++        // path below this volume ("/Volumes/OLD/Music/x.mp3" → "<root>/Music/x.mp3").
++        QString relative = path;
++        if (relative.startsWith(QStringLiteral("/Volumes/"))) {
++            const int slash = relative.indexOf(QChar('/'), 9);
++            relative = slash >= 0 ? relative.mid(slash) : QString();
++        } else if (relative.size() > 2 && relative.at(1) == QChar(':')) {
++            relative = relative.mid(2);
++        }
++        if (!relative.isEmpty()) {
++            candidates.prepend(options.volumeRoot + relative);
++        }
++    }
++    return firstExisting(candidates, options);
++}
++
++ParsedTrack parseRekordboxTrack(QXmlStreamReader& xml, const ExternalCatalogOptions& options) {
++    ParsedTrack parsed;
++    auto& track = parsed.track;
++    const auto attributes = xml.attributes();
++    const auto text = [&](const char* name) {
++        return attributes.value(QLatin1String(name)).toString();
++    };
++    track.title = text("Name");
++    track.artist = text("Artist");
++    track.album = text("Album");
++    track.genre = text("Genre");
++    track.comment = text("Comments");
++    track.composer = text("Composer");
++    track.key = text("Tonality");
++    bool ok = false;
++    const int seconds = text("TotalTime").toInt(&ok);
++    if (ok && seconds > 0) {
++        track.durationSeconds = static_cast<quint32>(seconds);
++    }
++    const double averageBpm = text("AverageBpm").toDouble(&ok);
++    if (ok && averageBpm > 0 && averageBpm < 1000) {
++        track.bpm = averageBpm;
++    }
++    const int rating = text("Rating").toInt(&ok);
++    if (ok) {
++        track.rating = ratingFrom255(rating);
++    }
++    for (const auto& [attribute, field] : {qMakePair(QStringLiteral("Year"), QStringLiteral("year")),
++                 qMakePair(QStringLiteral("Label"), QStringLiteral("label")),
++                 qMakePair(QStringLiteral("Remixer"), QStringLiteral("remixer")),
++                 qMakePair(QStringLiteral("DateAdded"), QStringLiteral("date_added"))}) {
++        const auto value = attributes.value(attribute).toString();
++        if (!value.isEmpty() && value != QStringLiteral("0")) {
++            track.rawMetadata.insert(field, value);
++        }
++    }
++    const auto location = text("Location");
++    const auto trackId = text("TrackID");
++    struct Tempo {
++        double startMs;
++        double bpm;
++    };
++    QList<Tempo> tempos;
++    QList<RuntimeCue> memoryCues;
++    while (!xml.atEnd()) {
++        const auto token = xml.readNext();
++        if (token == QXmlStreamReader::EndElement && xml.name() == QStringLiteral("TRACK")) {
++            break;
++        }
++        if (token != QXmlStreamReader::StartElement) {
++            continue;
++        }
++        const auto child = xml.attributes();
++        if (xml.name() == QStringLiteral("TEMPO")) {
++            bool startOk = false;
++            bool bpmOk = false;
++            const double start = child.value(QStringLiteral("Inizio")).toDouble(&startOk);
++            const double bpm = child.value(QStringLiteral("Bpm")).toDouble(&bpmOk);
++            if (startOk && bpmOk && bpm > 0 && bpm < 1000 && std::isfinite(start)) {
++                tempos.append({start * 1000.0, bpm});
++            }
++        } else if (xml.name() == QStringLiteral("POSITION_MARK")) {
++            bool startOk = false;
++            const double start = child.value(QStringLiteral("Start")).toDouble(&startOk);
++            if (!startOk || !std::isfinite(start)) {
++                continue;
++            }
++            const int type = child.value(QStringLiteral("Type")).toInt();
++            const int number = child.value(QStringLiteral("Num")).toInt();
++            const int slot = number >= 0 && number < 8 ? number + 1 : -1;
++            RuntimeCue cue;
++            cue.label = child.value(QStringLiteral("Name")).toString();
++            cue.startMs = std::max(0.0, start * 1000.0);
++            if (child.hasAttribute(QStringLiteral("Red"))) {
++                const auto red = child.value(QStringLiteral("Red")).toUInt() & 0xFF;
++                const auto green = child.value(QStringLiteral("Green")).toUInt() & 0xFF;
++                const auto blue = child.value(QStringLiteral("Blue")).toUInt() & 0xFF;
++                cue.color = mixxx::RgbColor::optional((red << 16) | (green << 8) | blue);
++            }
++            if (type == 4) {
++                bool endOk = false;
++                const double end = child.value(QStringLiteral("End")).toDouble(&endOk);
++                if (!endOk || !(end > start)) {
++                    continue;
++                }
++                cue.endMs = end * 1000.0;
++                cue.kind = slot > 0 ? RuntimeCue::Kind::HotLoop : RuntimeCue::Kind::MemoryLoop;
++            } else {
++                cue.kind = slot > 0 ? RuntimeCue::Kind::HotCue : RuntimeCue::Kind::MemoryCue;
++            }
++            cue.hotcueIndex = slot;
++            if (slot > 0) {
++                track.cues.append(cue);
++            } else {
++                memoryCues.append(cue);
++            }
++        }
++    }
++    // Memory cues in time order; the earliest becomes the main cue.
++    std::stable_sort(memoryCues.begin(), memoryCues.end(), [](const auto& a, const auto& b) {
++        return *a.startMs < *b.startMs;
++    });
++    track.cues = memoryCues + track.cues;
++    std::stable_sort(tempos.begin(), tempos.end(), [](const auto& a, const auto& b) {
++        return a.startMs < b.startMs;
++    });
++    if (!tempos.isEmpty()) {
++        const bool constant = std::all_of(tempos.cbegin(), tempos.cend(), [&](const Tempo& tempo) {
++            return std::abs(tempo.bpm - tempos.first().bpm) < 0.005;
++        });
++        if (constant) {
++            track.rawMetadata.insert(QStringLiteral("grid_bpm"), tempos.first().bpm);
++            track.rawMetadata.insert(QStringLiteral("grid_ms"), tempos.first().startMs);
++        } else {
++            // Variable tempo: one beat per position, segment by segment.
++            const double endMs = track.durationSeconds
++                    ? *track.durationSeconds * 1000.0
++                    : tempos.last().startMs + 60000.0 * 64 / tempos.last().bpm;
++            for (int i = 0; i < tempos.size() && track.beats.size() < kMaxGeneratedBeats; ++i) {
++                const double segmentEnd = i + 1 < tempos.size() ? tempos[i + 1].startMs : endMs;
++                const double interval = 60000.0 / tempos[i].bpm;
++                for (double position = tempos[i].startMs;
++                        position < segmentEnd - 0.5 && track.beats.size() < kMaxGeneratedBeats;
++                        position += interval) {
++                    if (position < 0) {
++                        continue;
++                    }
++                    RuntimeBeat beat;
++                    beat.timeMs = static_cast<quint32>(std::llround(position));
++                    beat.beatInBar = static_cast<quint16>(track.beats.size() % 4 + 1);
++                    beat.tempoCentiBpm = static_cast<quint16>(
++                            qBound(1.0, std::round(tempos[i].bpm * 100.0), 65535.0));
++                    if (!track.beats.isEmpty() && beat.timeMs <= track.beats.last().timeMs) {
++                        continue;
++                    }
++                    track.beats.append(beat);
++                }
++            }
++        }
++    }
++    track.rawMetadata.insert(QStringLiteral("provider"), QStringLiteral("rekordbox_xml"));
++    track.resolvedAudioPath = resolveRekordboxLocation(location, options);
++    if (track.title.isEmpty()) {
++        track.title = QFileInfo(localPathFromRekordboxLocation(location)).completeBaseName();
++    }
++    if (!trackId.isEmpty()) {
++        parsed.lookupKeys.append(QStringLiteral("id:") + trackId);
++    }
++    if (!location.isEmpty()) {
++        parsed.lookupKeys.append(QStringLiteral("location:") + location);
++    }
++    return parsed;
++}
++
++ParsedNode parseRekordboxNode(QXmlStreamReader& xml, int depth, int* nodeCount, bool* valid) {
++    ParsedNode node;
++    const auto attributes = xml.attributes();
++    node.name = attributes.value(QStringLiteral("Name")).toString();
++    const auto type = attributes.value(QStringLiteral("Type")).toString();
++    node.isFolder = type == QStringLiteral("0");
++    *valid = node.isFolder || type == QStringLiteral("1");
++    const bool byLocation = attributes.value(QStringLiteral("KeyType")) == QStringLiteral("1");
++    if (++*nodeCount > kMaxPlaylistNodes || depth > kMaxPlaylistDepth) {
++        *valid = false;
++        xml.skipCurrentElement();
++        return node;
++    }
++    while (!xml.atEnd()) {
++        const auto token = xml.readNext();
++        if (token == QXmlStreamReader::EndElement && xml.name() == QStringLiteral("NODE")) {
++            break;
++        }
++        if (token != QXmlStreamReader::StartElement) {
++            continue;
++        }
++        if (xml.name() == QStringLiteral("NODE")) {
++            bool childValid = false;
++            auto child = parseRekordboxNode(xml, depth + 1, nodeCount, &childValid);
++            if (childValid && node.isFolder) {
++                node.children.append(std::move(child));
++            }
++        } else if (xml.name() == QStringLiteral("TRACK")) {
++            const auto key = xml.attributes().value(QStringLiteral("Key")).toString();
++            if (!key.isEmpty()) {
++                node.entryKeys.append((byLocation ? QStringLiteral("location:")
++                                                  : QStringLiteral("id:")) +
++                        key);
++            }
++        }
++    }
++    return node;
++}
++
++ParsedFile parseRekordboxXml(QXmlStreamReader& xml, const ExternalCatalogOptions& options) {
++    ParsedFile result;
++    bool inCollection = false;
++    int nodeCount = 0;
++    while (!xml.atEnd()) {
++        const auto token = xml.readNext();
++        if (token == QXmlStreamReader::EndElement && xml.name() == QStringLiteral("COLLECTION")) {
++            inCollection = false;
++            continue;
++        }
++        if (token != QXmlStreamReader::StartElement) {
++            continue;
++        }
++        if (xml.name() == QStringLiteral("COLLECTION")) {
++            inCollection = true;
++        } else if (inCollection && xml.name() == QStringLiteral("TRACK")) {
++            if (result.tracks.size() >= kMaxTracks) {
++                result.error = QStringLiteral("Too many tracks");
++                return result;
++            }
++            result.tracks.append(parseRekordboxTrack(xml, options));
++        } else if (xml.name() == QStringLiteral("PLAYLISTS")) {
++            while (!xml.atEnd()) {
++                const auto inner = xml.readNext();
++                if (inner == QXmlStreamReader::EndElement &&
++                        xml.name() == QStringLiteral("PLAYLISTS")) {
++                    break;
++                }
++                if (inner == QXmlStreamReader::StartElement && xml.name() == QStringLiteral("NODE")) {
++                    bool valid = false;
++                    auto root = parseRekordboxNode(xml, 0, &nodeCount, &valid);
++                    if (!valid) {
++                        continue;
++                    }
++                    // "ROOT" is rekordbox's invisible top folder.
++                    if (root.isFolder && root.name == QStringLiteral("ROOT")) {
++                        result.roots.append(root.children);
++                    } else {
++                        result.roots.append(std::move(root));
++                    }
++                }
++            }
++        }
++    }
++    return result;
++}
++
++ParsedFile parseFile(const QString& path,
++        ExternalCatalogKind kind,
++        const ExternalCatalogOptions& options) {
++    ParsedFile result;
++    QFile file(path);
++    if (!file.open(QIODevice::ReadOnly)) {
++        result.error = file.errorString();
++        return result;
++    }
++    if (file.size() > kMaxCatalogBytes) {
++        result.error = QStringLiteral("Library file exceeds the 256 MiB read limit");
++        return result;
++    }
++    QXmlStreamReader xml(&file);
++    result = kind == ExternalCatalogKind::TraktorNml
++            ? parseTraktor(xml, options)
++            : parseRekordboxXml(xml, options);
++    if (xml.hasError() && result.error.isEmpty()) {
++        result.error = QStringLiteral("%1 (line %2)").arg(xml.errorString()).arg(xml.lineNumber());
++    }
++    return result;
++}
++
++bool convertNode(const ParsedNode& parsed,
++        const QHash<QString, quint32>& keyToId,
++        quint32* nextPlaylistId,
++        RuntimePlaylistNode* out) {
++    out->rekordboxId = (*nextPlaylistId)++;
++    out->name = parsed.name.trimmed().isEmpty() ? QStringLiteral("(untitled)") : parsed.name;
++    out->isFolder = parsed.isFolder;
++    out->sortOrder = out->rekordboxId;
++    if (parsed.isFolder) {
++        for (const auto& child : parsed.children) {
++            RuntimePlaylistNode node;
++            if (convertNode(child, keyToId, nextPlaylistId, &node)) {
++                out->children.append(std::move(node));
++            }
++        }
++    } else {
++        for (const auto& key : parsed.entryKeys) {
++            const auto id = keyToId.value(key);
++            if (id != 0) {
++                out->trackIds.append(id);
++            }
++        }
++    }
++    return true;
++}
++
++BrowseMenu externalBrowseMenu(bool includeFolder) {
++    BrowseMenu menu;
++    QStringList labels{QStringLiteral("ARTIST"),
++            QStringLiteral("ALBUM"),
++            QStringLiteral("TRACK"),
++            QStringLiteral("KEY"),
++            QStringLiteral("PLAYLIST"),
++            QStringLiteral("MATCHING"),
++            QStringLiteral("GENRE"),
++            QStringLiteral("BPM"),
++            QStringLiteral("RATING")};
++    if (includeFolder) {
++        labels.append(QStringLiteral("FOLDER"));
++    }
++    quint16 position = 0;
++    for (const auto& label : labels) {
++        BrowseCategory category;
++        category.id = static_cast<quint16>(position + 1);
++        category.label = label;
++        category.position = position++;
++        category.visibility = 1;
++        menu.categories.append(category);
++    }
++    return menu;
++}
++
++} // namespace
++
++QString traktorMusicalKeyText(int value) {
++    static const QStringList keys{QStringLiteral("C"),
++            QStringLiteral("C#"),
++            QStringLiteral("D"),
++            QStringLiteral("Eb"),
++            QStringLiteral("E"),
++            QStringLiteral("F"),
++            QStringLiteral("F#"),
++            QStringLiteral("G"),
++            QStringLiteral("Ab"),
++            QStringLiteral("A"),
++            QStringLiteral("Bb"),
++            QStringLiteral("B"),
++            QStringLiteral("Cm"),
++            QStringLiteral("C#m"),
++            QStringLiteral("Dm"),
++            QStringLiteral("Ebm"),
++            QStringLiteral("Em"),
++            QStringLiteral("Fm"),
++            QStringLiteral("F#m"),
++            QStringLiteral("Gm"),
++            QStringLiteral("G#m"),
++            QStringLiteral("Am"),
++            QStringLiteral("Bbm"),
++            QStringLiteral("Bm")};
++    return value >= 0 && value < keys.size() ? keys.at(value) : QString();
++}
++
++ExternalCatalogKind detectExternalCatalog(const QString& path) {
++    QFile file(path);
++    if (!file.open(QIODevice::ReadOnly) || file.size() > kMaxCatalogBytes) {
++        return ExternalCatalogKind::Unknown;
++    }
++    const QString head = QString::fromUtf8(file.read(4096));
++    if (head.contains(QStringLiteral("<NML"))) {
++        return ExternalCatalogKind::TraktorNml;
++    }
++    if (head.contains(QStringLiteral("<DJ_PLAYLISTS"))) {
++        return ExternalCatalogKind::RekordboxXml;
++    }
++    return ExternalCatalogKind::Unknown;
++}
++
++QStringList findExternalCatalogFiles(const QString& root, int maxDepth, int maxEntries, int maxFiles) {
++    QStringList found;
++    const QString canonicalRoot = QFileInfo(root).canonicalFilePath();
++    if (canonicalRoot.isEmpty()) {
++        return found;
++    }
++    QList<QPair<QString, int>> pending{{canonicalRoot, 0}};
++    int visited = 0;
++    while (!pending.isEmpty() && found.size() < maxFiles) {
++        const auto [directory, depth] = pending.takeFirst();
++        QDirIterator entries(directory,
++                QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Readable);
++        while (entries.hasNext()) {
++            entries.next();
++            if (++visited > maxEntries) {
++                return found;
++            }
++            const QFileInfo entry = entries.fileInfo();
++            if (entry.isSymLink() || isSkippedSystemName(entry.fileName())) {
++                continue;
++            }
++            if (entry.isDir()) {
++                if (depth + 1 <= maxDepth) {
++                    pending.append({entry.absoluteFilePath(), depth + 1});
++                }
++                continue;
++            }
++            const auto suffix = entry.suffix().toLower();
++            if ((suffix == QStringLiteral("nml") || suffix == QStringLiteral("xml")) &&
++                    entry.size() <= kMaxCatalogBytes &&
++                    detectExternalCatalog(entry.absoluteFilePath()) != ExternalCatalogKind::Unknown) {
++                found.append(entry.absoluteFilePath());
++                if (found.size() >= maxFiles) {
++                    break;
++                }
++            }
++        }
++    }
++    found.sort();
++    return found;
++}
++
++QString findLocalTraktorCollection(const QString& documentsPath) {
++    const QDir nativeInstruments(QDir(documentsPath).filePath(QStringLiteral("Native Instruments")));
++    QVersionNumber best(-1);
++    QString bestPath;
++    const auto folders = nativeInstruments.entryInfoList(
++            QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks);
++    for (const auto& folder : folders) {
++        const auto name = folder.fileName();
++        if (!name.startsWith(QStringLiteral("Traktor"))) {
++            continue;
++        }
++        const QString collection = QDir(folder.absoluteFilePath()).filePath(QStringLiteral("collection.nml"));
++        if (!QFileInfo::exists(collection)) {
++            continue;
++        }
++        auto version = QVersionNumber::fromString(name.mid(7).trimmed());
++        if (version.isNull()) {
++            version = QVersionNumber(1);
++        }
++        if (bestPath.isEmpty() || version > best) {
++            best = version;
++            bestPath = collection;
++        }
++    }
++    return bestPath;
++}
++
++QByteArray externalCatalogFingerprint(const QStringList& files) {
++    QStringList sorted = files;
++    sorted.sort();
++    QCryptographicHash hash(QCryptographicHash::Sha256);
++    for (const auto& path : std::as_const(sorted)) {
++        const QFileInfo info(path);
++        hash.addData(QStringLiteral("%1|%2|%3\n")
++                             .arg(info.absoluteFilePath())
++                             .arg(info.size())
++                             .arg(info.lastModified().toMSecsSinceEpoch())
++                             .toUtf8());
++    }
++    return hash.result();
++}
++
++std::shared_ptr<RuntimeCatalog> buildExternalCatalog(const QStringList& files,
++        const ExternalCatalogOptions& options,
++        QString* error) {
++    auto catalog = std::make_shared<RuntimeCatalog>();
++    QStringList errors;
++    quint32 nextTrackId = 1;
++    quint32 nextPlaylistId = 1;
++    QHash<QString, quint32> byResolvedPath;
++    int parsedFiles = 0;
++    for (const auto& path : files) {
++        const auto kind = detectExternalCatalog(path);
++        if (kind == ExternalCatalogKind::Unknown) {
++            errors.append(QStringLiteral("%1: not a Traktor or rekordbox XML library")
++                                  .arg(QFileInfo(path).fileName()));
++            continue;
++        }
++        auto parsed = parseFile(path, kind, options);
++        if (!parsed.error.isEmpty()) {
++            errors.append(QStringLiteral("%1: %2").arg(QFileInfo(path).fileName(), parsed.error));
++            if (parsed.tracks.isEmpty()) {
++                continue;
++            }
++        }
++        ++parsedFiles;
++        QHash<QString, quint32> keyToId;
++        for (auto& entry : parsed.tracks) {
++            quint32 id = 0;
++            if (!entry.track.resolvedAudioPath.isEmpty()) {
++                id = byResolvedPath.value(entry.track.resolvedAudioPath);
++            }
++            if (id == 0) {
++                if (nextTrackId > static_cast<quint32>(kMaxTracks)) {
++                    errors.append(QStringLiteral("Too many tracks"));
++                    break;
++                }
++                id = nextTrackId++;
++                entry.track.rekordboxId = id;
++                // Unique catalog key: the absolute audio path, or a provider key.
++                entry.track.audioRelativePath = !entry.track.resolvedAudioPath.isEmpty()
++                        ? entry.track.resolvedAudioPath
++                        : QStringLiteral("missing:%1:%2").arg(id).arg(
++                                  entry.lookupKeys.value(0));
++                entry.track.analysisState = RuntimeAnalysisState::Missing;
++                entry.track.rawMetadata.insert(QStringLiteral("source_file"),
++                        QFileInfo(path).fileName());
++                if (!entry.track.resolvedAudioPath.isEmpty()) {
++                    byResolvedPath.insert(entry.track.resolvedAudioPath, id);
++                }
++                if (!catalog->insertTrack(entry.track)) {
++                    continue;
++                }
++            }
++            for (const auto& key : std::as_const(entry.lookupKeys)) {
++                if (!key.isEmpty() && !keyToId.contains(key)) {
++                    keyToId.insert(key, id);
++                }
++            }
++        }
++        for (const auto& root : std::as_const(parsed.roots)) {
++            RuntimePlaylistNode node;
++            convertNode(root, keyToId, &nextPlaylistId, &node);
++            if (!catalog->insertPlaylist(std::move(node))) {
++                errors.append(QStringLiteral("%1: invalid playlist %2")
++                                      .arg(QFileInfo(path).fileName(), root.name));
++            }
++        }
++    }
++    for (const auto& message : std::as_const(errors)) {
++        catalog->appendDiagnostic(message);
++    }
++    if (parsedFiles == 0) {
++        if (error) {
++            *error = errors.isEmpty() ? QStringLiteral("No library file could be read")
++                                      : errors.join(QStringLiteral("; "));
++        }
++        catalog->invalidate();
++        return nullptr;
++    }
++    catalog->setBrowseMenu(externalBrowseMenu(options.includeFolderCategory));
++    catalog->seal();
++    if (error) {
++        *error = errors.join(QStringLiteral("; "));
++    }
++    return catalog;
++}
++
++} // namespace mixxx::rekordbox
+diff --git a/src/library/rekordbox/externalcatalog.h b/src/library/rekordbox/externalcatalog.h
+new file mode 100644
+index 0000000..6473338
+--- /dev/null
++++ b/src/library/rekordbox/externalcatalog.h
+@@ -0,0 +1,60 @@
++#pragma once
++
++#include <QByteArray>
++#include <QString>
++#include <QStringList>
++
++#include <functional>
++#include <memory>
++
++#include "library/rekordbox/rekordboxruntimecatalog.h"
++
++namespace mixxx::rekordbox {
++
++// Read-only DJ library files that NauticMixxx can browse besides rekordbox USB
++// exports. Parsing never writes to the file, its folder or the audio files.
++enum class ExternalCatalogKind {
++    Unknown,
++    TraktorNml,   // Traktor collection.nml or an exported Traktor playlist (.nml)
++    RekordboxXml, // rekordbox "Export Collection in xml format" (DJ_PLAYLISTS)
++};
++
++// Identifies the format from the first bytes only.
++ExternalCatalogKind detectExternalCatalog(const QString& path);
++
++// Bounded, read-only search for library files on a USB volume (system and
++// hidden folders are skipped, links are never followed).
++QStringList findExternalCatalogFiles(const QString& root,
++        int maxDepth = 2,
++        int maxEntries = 3000,
++        int maxFiles = 32);
++
++// Newest "<Documents>/Native Instruments/Traktor x.y.z/collection.nml".
++QString findLocalTraktorCollection(const QString& documentsPath);
++
++struct ExternalCatalogOptions {
++    // Catalogs found on a USB resolve exported locations inside this volume
++    // first (Traktor "Export Playlist", rekordbox XML copied with the music).
++    QString volumeRoot;
++    // USB catalogs also offer FOLDER browsing of the volume.
++    bool includeFolderCategory{false};
++    // Test hook; defaults to QFileInfo::exists.
++    std::function<bool(const QString&)> fileExists;
++};
++
++// Builds and seals a catalog from one or more library files. Tracks keep
++// their absolute audio path in resolvedAudioPath (empty when not found).
++// rawMetadata carries "provider" ("traktor" / "rekordbox_xml") and, for a
++// constant tempo, "grid_bpm" / "grid_ms" (first beat, milliseconds).
++std::shared_ptr<RuntimeCatalog> buildExternalCatalog(const QStringList& files,
++        const ExternalCatalogOptions& options,
++        QString* error = nullptr);
++
++// Identity of the inputs (path, size, modification time). A change makes
++// discovery rebuild the catalog.
++QByteArray externalCatalogFingerprint(const QStringList& files);
++
++// Traktor MUSICAL_KEY value (0..23) to key text, or empty.
++QString traktorMusicalKeyText(int value);
++
++} // namespace mixxx::rekordbox
 diff --git a/src/library/rekordbox/rekordboxdevice.cpp b/src/library/rekordbox/rekordboxdevice.cpp
-index 8e45c99..a170b8b 100644
+index 8e45c99..0d4ef2a 100644
 --- a/src/library/rekordbox/rekordboxdevice.cpp
 +++ b/src/library/rekordbox/rekordboxdevice.cpp
 @@ -4,16 +4,21 @@
@@ -76,7 +1112,7 @@ index 8e45c99..a170b8b 100644
  namespace {
  QMutex rootsMutex;
  QSet<QString> protectedRoots;
-+QSet<QString> folderOnlyRoots;
++QSet<QString> readOnlySourceRoots;
  
  QString absolutePath(const QString& path) {
      return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
@@ -84,7 +1120,7 @@ index 8e45c99..a170b8b 100644
      return false;
  }
  
-+void setFolderOnlyRoot(const QString& root, bool folderOnly) {
++void setReadOnlySourceRoot(const QString& root, bool readOnly) {
 +    if (root.isEmpty()) {
 +        return;
 +    }
@@ -96,26 +1132,26 @@ index 8e45c99..a170b8b 100644
 +            if (path.isEmpty()) {
 +                continue;
 +            }
-+            if (folderOnly) {
-+                folderOnlyRoots.insert(path);
++            if (readOnly) {
++                readOnlySourceRoots.insert(path);
 +            } else {
-+                folderOnlyRoots.remove(path);
++                readOnlySourceRoots.remove(path);
 +            }
 +        }
 +    }
-+    if (folderOnly) {
++    if (readOnly) {
 +        protectRoot(root);
 +    }
 +}
 +
-+bool isFolderOnlyPath(const QString& path) {
++bool isReadOnlySourcePath(const QString& path) {
 +    if (path.isEmpty()) {
 +        return false;
 +    }
 +    const auto absolute = absolutePath(path);
 +    const auto canonical = resolvedPath(path);
 +    QMutexLocker lock(&rootsMutex);
-+    for (const auto& root : std::as_const(folderOnlyRoots)) {
++    for (const auto& root : std::as_const(readOnlySourceRoots)) {
 +        if (inside(root, absolute) || (!canonical.isEmpty() && inside(root, canonical))) {
 +            return true;
 +        }
@@ -138,7 +1174,7 @@ index 8e45c99..a170b8b 100644
 +        return result;
 +    }
 +    result.mountIdentity = storage.device();
-+    setFolderOnlyRoot(result.root, true);
++    setReadOnlySourceRoot(result.root, true);
 +    result.state = DeviceState::Readable;
 +    return result;
 +}
@@ -191,7 +1227,7 @@ index 8e45c99..a170b8b 100644
          return result;
      }
 +    // This volume now carries an export: it is no longer a folder-only USB.
-+    setFolderOnlyRoot(result.root, false);
++    setReadOnlySourceRoot(result.root, false);
      const rx3::UsbStorageInfo storage(root);
      if(!storage.isReady() || storage.device().isEmpty()) {
          result.state=DeviceState::Unreadable;result.error=QStringLiteral("USB mount is unavailable");return result;
@@ -199,43 +1235,49 @@ index 8e45c99..a170b8b 100644
  
  bool DeviceSnapshot::matches(const DeviceSnapshot& other) const {
      return state == DeviceState::Readable && other.state == DeviceState::Readable &&
-+            folderOnly == other.folderOnly &&
++            folderOnly == other.folderOnly && externalKind == other.externalKind &&
              root == other.root && mountIdentity == other.mountIdentity && fingerprint == other.fingerprint;
  }
  } // namespace mixxx::rekordbox
 diff --git a/src/library/rekordbox/rekordboxdevice.h b/src/library/rekordbox/rekordboxdevice.h
-index 662afb2..ea8e678 100644
+index 662afb2..4e86031 100644
 --- a/src/library/rekordbox/rekordboxdevice.h
 +++ b/src/library/rekordbox/rekordboxdevice.h
-@@ -4,6 +4,8 @@
+@@ -3,6 +3,9 @@
+ #include <QByteArray>
  #include <QList>
  #include <QString>
- 
-+#include <functional>
++#include <QStringList>
 +
++#include <functional>
+ 
  namespace mixxx::rekordbox {
  
- enum class DeviceState { Missing, Unreadable, Readable, TooLarge };
-@@ -17,6 +19,9 @@ struct DeviceSnapshot {
+@@ -17,6 +20,13 @@ struct DeviceSnapshot {
      DeviceState state{DeviceState::Missing};
      QString error;
      QByteArray mountIdentity; // Mounted filesystem/device, independently of PDB contents.
 +    // A USB volume without a rekordbox export. It is browsed by FOLDER only and
 +    // NauticMixxx never writes to it.
 +    bool folderOnly{false};
++    // Traktor NML / rekordbox XML catalog: "usb" (files found on this volume)
++    // or "library" (a library file on this computer; root is that file).
++    QString externalKind;
++    QStringList externalFiles;
  
      bool matches(const DeviceSnapshot& other) const;
  };
-@@ -52,4 +57,17 @@ QString resolvePath(const QString& root, const QString& exportedPath,
+@@ -52,4 +62,18 @@ QString resolvePath(const QString& root, const QString& exportedPath,
  void protectRoot(const QString& root);
  bool isReadOnlyPath(const QString& path);
  
-+// Folder-only (non-rekordbox) USB volumes. Marking a root also protects it, so
-+// every Mixxx write boundary that checks isReadOnlyPath() refuses it. Explicit
-+// rekordbox writers (MY SETTINGS, colors, lists, recordings) additionally
-+// refuse any path for which isFolderOnlyPath() is true.
-+void setFolderOnlyRoot(const QString& root, bool folderOnly);
-+bool isFolderOnlyPath(const QString& path);
++// Read-only sources: USB volumes without a rekordbox export and Traktor /
++// rekordbox XML libraries. Marking a root also protects it, so every Mixxx
++// write boundary that checks isReadOnlyPath() refuses it. Explicit rekordbox
++// writers (MY SETTINGS, colors, lists, recordings) additionally refuse any
++// path for which isReadOnlySourcePath() is true.
++void setReadOnlySourceRoot(const QString& root, bool readOnly);
++bool isReadOnlySourcePath(const QString& path);
 +DeviceSnapshot inspectFolderDevice(const QString& root);
 +// Bounded, read-only search for at least one supported audio file.
 +bool folderContainsSupportedAudio(const QString& root,
@@ -245,12 +1287,17 @@ index 662afb2..ea8e678 100644
 +
  } // namespace mixxx::rekordbox
 diff --git a/src/library/rekordbox/rekordboxfeature.cpp b/src/library/rekordbox/rekordboxfeature.cpp
-index 05046e4..aaebebf 100644
+index 05046e4..f41eae3 100644
 --- a/src/library/rekordbox/rekordboxfeature.cpp
 +++ b/src/library/rekordbox/rekordboxfeature.cpp
-@@ -18,18 +18,22 @@
+@@ -16,24 +16,36 @@
+ #include <QVariant>
+ #include <QtConcurrentRun>
  
++#include <QStandardPaths>
++
  #include "library/dao/settingsdao.h"
++#include "library/rekordbox/externalcatalog.h"
  #include "library/library.h"
 +#include "library/library_prefs.h"
  #include "library/trackcollection.h"
@@ -271,7 +1318,16 @@ index 05046e4..aaebebf 100644
  const QString kAllTracksItem = QStringLiteral("rekordbox-runtime-all");
  const QString kPlaylistItem = QStringLiteral("rekordbox-runtime-playlist");
  const QString kAuthorizedUsbRootsSettingsKey =
-@@ -55,9 +59,44 @@ QString rekordboxDeviceRootFromSelection(const QString& selectedPath) {
+         QStringLiteral("mixxx.rekordboxfeature.sandboxed_usb_roots");
++const QString kExternalLibrariesSettingsKey =
++        QStringLiteral("mixxx.rekordboxfeature.external_libraries");
++const QString kKindRekordbox = QStringLiteral("usb");
++const QString kKindFolder = QStringLiteral("folder");
++const QString kKindLibrary = QStringLiteral("library");
+ const QString kStatusPreparing = QStringLiteral("preparing");
+ const QString kStatusReady = QStringLiteral("ready");
+ const QString kStatusError = QStringLiteral("error");
+@@ -55,9 +67,82 @@ QString rekordboxDeviceRootFromSelection(const QString& selectedPath) {
      return {};
  }
  
@@ -286,7 +1342,7 @@ index 05046e4..aaebebf 100644
 +// A folder-only source must be the root of a removable-looking volume, never
 +// the system or home volume. Explicitly authorized macOS roots skip the audio
 +// probe because the user chose them in the native dialog.
-+bool isFolderUsbCandidate(const QString& path, bool authorized) {
++bool isRemovableVolumeRoot(const QString& path) {
 +    const QString canonical = QFileInfo(path).canonicalFilePath();
 +    if (canonical.isEmpty() || !QFileInfo(canonical).isDir()) {
 +        return false;
@@ -303,21 +1359,59 @@ index 05046e4..aaebebf 100644
 +            return false;
 +        }
 +    }
-+    return authorized ||
-+            mixxx::rekordbox::folderContainsSupportedAudio(canonical,
-+                    [](const QString& name) {
-+                        return SoundSourceProxy::isFileNameSupported(name);
-+                    });
++    return true;
++}
++
++bool volumeHoldsMusic(const QString& path) {
++    return mixxx::rekordbox::folderContainsSupportedAudio(path, [](const QString& name) {
++        return SoundSourceProxy::isFileNameSupported(name);
++    });
++}
++
++QString libraryLabel(const QString& file) {
++    return mixxx::rekordbox::detectExternalCatalog(file) ==
++                    mixxx::rekordbox::ExternalCatalogKind::TraktorNml
++            ? QStringLiteral("TRAKTOR")
++            : QStringLiteral("REKORDBOX XML");
++}
++
++mixxx::rekordbox::DeviceSnapshot externalSnapshot(const QString& root,
++        const QString& kind,
++        const QStringList& files) {
++    mixxx::rekordbox::DeviceSnapshot snapshot;
++    snapshot.root = QFileInfo(root).canonicalFilePath();
++    snapshot.externalKind = kind;
++    snapshot.externalFiles = files;
++    if (snapshot.root.isEmpty() || files.isEmpty()) {
++        snapshot.error = QStringLiteral("Library is missing");
++        return snapshot;
++    }
++    if (kind == kKindRekordbox) {
++        const rx3::UsbStorageInfo storage(snapshot.root);
++        if (!storage.isReady() || storage.device().isEmpty()) {
++            snapshot.state = mixxx::rekordbox::DeviceState::Unreadable;
++            snapshot.error = QStringLiteral("USB mount is unavailable");
++            return snapshot;
++        }
++        snapshot.mountIdentity = storage.device();
++    }
++    // Read-only from discovery on, before any session or track exists.
++    mixxx::rekordbox::setReadOnlySourceRoot(snapshot.root, true);
++    snapshot.fingerprint = mixxx::rekordbox::externalCatalogFingerprint(files);
++    snapshot.state = mixxx::rekordbox::DeviceState::Readable;
++    return snapshot;
 +}
 +
  // Discovery performs bounded, read-only fingerprinting off the GUI thread.
  QList<mixxx::rekordbox::DiscoveredDevice> findRekordboxDevices(
 -        const QStringList& manuallyAuthorizedDevicePaths) {
-+        const QStringList& manuallyAuthorizedDevicePaths, bool includeFolderUsb) {
++        const QStringList& manuallyAuthorizedDevicePaths,
++        bool includeFolderUsb,
++        const QStringList& libraryFiles) {
      QThread::currentThread()->setPriority(QThread::LowPriority);
      QFileInfoList devices;
  #if defined(__WINDOWS__)
-@@ -80,6 +119,24 @@ QList<mixxx::rekordbox::DiscoveredDevice> findRekordboxDevices(
+@@ -80,6 +165,39 @@ QList<mixxx::rekordbox::DiscoveredDevice> findRekordboxDevices(
      QSet<QString> seen;
      for (const auto& device : std::as_const(devices)) {
          if (findRekordboxPdbPath(device.absoluteFilePath()).isEmpty()) {
@@ -326,7 +1420,25 @@ index 05046e4..aaebebf 100644
 +            }
 +            const bool authorized =
 +                    manuallyAuthorizedDevicePaths.contains(device.absoluteFilePath());
-+            if (!isFolderUsbCandidate(device.absoluteFilePath(), authorized)) {
++            if (!isRemovableVolumeRoot(device.absoluteFilePath())) {
++                continue;
++            }
++            const auto label = device.fileName().isEmpty()
++                    ? device.absoluteFilePath()
++                    : device.fileName();
++            // Traktor playlists / rekordbox XML exported to this USB.
++            const auto catalogs = mixxx::rekordbox::findExternalCatalogFiles(
++                    device.absoluteFilePath());
++            if (!catalogs.isEmpty()) {
++                auto snapshot = externalSnapshot(device.absoluteFilePath(), kKindRekordbox, catalogs);
++                if (snapshot.state == mixxx::rekordbox::DeviceState::Readable &&
++                        !seen.contains(snapshot.root)) {
++                    seen.insert(snapshot.root);
++                    found.append({label, std::move(snapshot)});
++                }
++                continue;
++            }
++            if (!authorized && !volumeHoldsMusic(device.absoluteFilePath())) {
 +                continue;
 +            }
 +            auto snapshot = mixxx::rekordbox::inspectFolderDevice(device.absoluteFilePath());
@@ -335,23 +1447,69 @@ index 05046e4..aaebebf 100644
 +                continue;
 +            }
 +            seen.insert(snapshot.root);
-+            const auto label = device.fileName().isEmpty()
-+                    ? device.absoluteFilePath()
-+                    : device.fileName();
 +            found.append({label, std::move(snapshot)});
              continue;
          }
          auto snapshot = mixxx::rekordbox::inspectDevice(device.absoluteFilePath());
-@@ -313,7 +370,7 @@ void RekordboxFeature::startDiscovery() {
+@@ -96,6 +214,21 @@ QList<mixxx::rekordbox::DiscoveredDevice> findRekordboxDevices(
+                 : device.fileName();
+         found.append({label, std::move(snapshot)});
+     }
++    // Traktor collection / rekordbox XML files on this computer.
++    for (const auto& file : libraryFiles) {
++        if (!QFileInfo(file).isFile() ||
++                mixxx::rekordbox::detectExternalCatalog(file) ==
++                        mixxx::rekordbox::ExternalCatalogKind::Unknown) {
++            continue;
++        }
++        auto snapshot = externalSnapshot(file, kKindLibrary, {QFileInfo(file).canonicalFilePath()});
++        if (snapshot.state != mixxx::rekordbox::DeviceState::Readable ||
++                seen.contains(snapshot.root)) {
++            continue;
++        }
++        seen.insert(snapshot.root);
++        found.append({libraryLabel(file), std::move(snapshot)});
++    }
+     return found;
+ }
  
+@@ -311,9 +444,33 @@ void RekordboxFeature::startDiscovery() {
+     }
+ #endif
+ 
++    QStringList libraryFiles;
++    if (externalLibrariesEnabled()) {
++        for (const auto& file : storedExternalLibraries()) {
++            if (Sandbox::enabled() && !m_rekordboxSecurityTokens.contains(file)) {
++                mixxx::FileInfo fileInfo(file);
++                auto token = Sandbox::openSecurityToken(&fileInfo, false);
++                if (token.isNull()) {
++                    continue; // Never prompt during discovery.
++                }
++                m_rekordboxSecurityTokens.insert(file, token);
++            }
++            libraryFiles.append(file);
++        }
++        if (!Sandbox::enabled()) {
++            // Without a sandbox the newest Traktor collection is found directly.
++            const auto traktor = mixxx::rekordbox::findLocalTraktorCollection(
++                    QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation));
++            if (!traktor.isEmpty() && !libraryFiles.contains(traktor)) {
++                libraryFiles.append(traktor);
++            }
++        }
++    }
      m_discoveryPending = true;
-     m_devicesFuture = QtConcurrent::run(
+-    m_devicesFuture = QtConcurrent::run(
 -            findRekordboxDevices, manuallyAuthorizedDevicePaths);
-+            findRekordboxDevices, manuallyAuthorizedDevicePaths, folderUsbSourcesEnabled());
++    m_devicesFuture = QtConcurrent::run(findRekordboxDevices,
++            manuallyAuthorizedDevicePaths,
++            folderUsbSourcesEnabled(),
++            libraryFiles);
      m_devicesFutureWatcher.setFuture(m_devicesFuture);
  #if defined(Q_OS_MACOS)
      if (!rootNeedingAccess.isEmpty() && !m_authorizationPending) {
-@@ -329,16 +386,28 @@ void RekordboxFeature::startDiscovery() {
+@@ -329,16 +486,28 @@ void RekordboxFeature::startDiscovery() {
  
  void RekordboxFeature::authorizeVolume(const QString& root) {
  #if defined(Q_OS_MACOS)
@@ -383,7 +1541,7 @@ index 05046e4..aaebebf 100644
          return;
      }
      if (Sandbox::enabled()) {
-@@ -379,6 +448,13 @@ void RekordboxFeature::activateChild(const QModelIndex& index) {
+@@ -379,6 +548,13 @@ void RekordboxFeature::activateChild(const QModelIndex& index) {
      const auto root = data[0].toString();
      const auto kind = data[1].toString();
  
@@ -397,7 +1555,7 @@ index 05046e4..aaebebf 100644
      if (kind == kDeviceItem) {
          m_selectedRoot = root;
          enqueueLoad(root);
-@@ -539,8 +615,14 @@ void RekordboxFeature::setDeviceStatus(
+@@ -539,8 +715,96 @@ void RekordboxFeature::setDeviceStatus(
      }
  }
  
@@ -406,31 +1564,148 @@ index 05046e4..aaebebf 100644
 +            mixxx::library::prefs::kFolderUsbSourcesConfigKey, true);
 +}
 +
++bool RekordboxFeature::externalLibrariesEnabled() const {
++    return !m_pConfig || m_pConfig->getValue<bool>(
++            mixxx::library::prefs::kExternalLibrarySourcesConfigKey, true);
++}
++
++QStringList RekordboxFeature::storedExternalLibraries() const {
++    SettingsDAO settings(
++            m_pLibrary->trackCollectionManager()->internalCollection()->database());
++    return settings.getValue(kExternalLibrariesSettingsKey)
++            .split(QChar('\n'), Qt::SkipEmptyParts);
++}
++
++void RekordboxFeature::storeExternalLibraries(const QStringList& files) {
++    SettingsDAO settings(
++            m_pLibrary->trackCollectionManager()->internalCollection()->database());
++    settings.setValue(kExternalLibrariesSettingsKey, files.join(QChar('\n')));
++}
++
++void RekordboxFeature::addExternalLibrary() {
++    if (!externalLibrariesEnabled()) {
++        return;
++    }
++    const auto documents = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
++    const auto nativeInstruments = QDir(documents).filePath(QStringLiteral("Native Instruments"));
++    const auto selected = QFileDialog::getOpenFileName(nullptr,
++            tr("Add a Traktor collection or rekordbox XML (read-only)"),
++            QDir(nativeInstruments).exists() ? nativeInstruments : documents,
++            tr("DJ libraries (*.nml *.xml)"));
++    if (selected.isEmpty()) {
++        return;
++    }
++    const auto file = QFileInfo(selected).canonicalFilePath();
++    auto files = storedExternalLibraries();
++    if (files.contains(file)) {
++        if (QMessageBox::question(nullptr,
++                    tr("Remove library from SOURCE"),
++                    tr("%1 is already in SOURCE. Remove it?\n\nThe file itself is not changed.")
++                            .arg(QFileInfo(file).fileName())) == QMessageBox::Yes) {
++            files.removeAll(file);
++            storeExternalLibraries(files);
++            m_rekordboxSecurityTokens.remove(file);
++            startDiscovery();
++        }
++        return;
++    }
++    if (mixxx::rekordbox::detectExternalCatalog(file) ==
++            mixxx::rekordbox::ExternalCatalogKind::Unknown) {
++        QMessageBox::warning(nullptr,
++                tr("Unsupported library"),
++                tr("Choose a Traktor collection (collection.nml or an exported .nml "
++                   "playlist) or a rekordbox XML (File > Export Collection in xml format)."));
++        return;
++    }
++    if (Sandbox::enabled()) {
++        mixxx::FileInfo fileInfo(file);
++        if (!Sandbox::createSecurityToken(&fileInfo)) {
++            QMessageBox::warning(nullptr,
++                    tr("Could not add library"),
++                    tr("Read access to the selected file could not be saved."));
++            return;
++        }
++        auto token = Sandbox::openSecurityToken(&fileInfo, false);
++        if (!token.isNull()) {
++            m_rekordboxSecurityTokens.insert(file, token);
++        }
++        // One folder permission covers the library's music (no per-track prompts).
++        QMessageBox::information(nullptr,
++                tr("Music folder"),
++                tr("Now select the folder that contains the music of this library "
++                   "(for example Music). NauticMixxx only reads it."));
++        const auto music = QFileDialog::getExistingDirectory(nullptr,
++                tr("Select the music folder of this library (read-only)"),
++                QStandardPaths::writableLocation(QStandardPaths::MusicLocation));
++        if (!music.isEmpty()) {
++            Sandbox::createSecurityTokenForDir(QDir(music));
++        }
++    }
++    files.append(file);
++    storeExternalLibraries(files);
++    startDiscovery();
++}
++
  void RekordboxFeature::enqueueLoad(const QString& root) {
      if (!m_devices.contains(root) ||
 +            m_devices.value(root).folderOnly ||
              m_devices.value(root).state != mixxx::rekordbox::DeviceState::Readable ||
              m_sessions.contains(root) || m_queuedRoots.contains(root) ||
              (m_parsePending && m_loadingRoot == root)) {
-@@ -643,6 +725,17 @@ void RekordboxFeature::onRekordboxDevicesFound() {
+@@ -565,8 +829,21 @@ void RekordboxFeature::startNextLoad() {
+         m_parsePending = true;
+         m_loadingRoot = root;
+         m_loadingGeneration = m_generations.value(root);
+-        m_loadingSession =
+-                std::make_shared<mixxx::rekordbox::RekordboxUsbSession>(root);
++        const auto device = m_devices.value(root);
++        if (device.externalKind.isEmpty()) {
++            m_loadingSession =
++                    std::make_shared<mixxx::rekordbox::RekordboxUsbSession>(root);
++        } else {
++            mixxx::rekordbox::ExternalSessionSource external;
++            external.files = device.externalFiles;
++            external.kind = device.externalKind;
++            if (device.externalKind == kKindRekordbox) {
++                external.volumeRoot = root;
++                external.includeFolderCategory = true;
++            }
++            m_loadingSession = std::make_shared<mixxx::rekordbox::RekordboxUsbSession>(
++                    root, std::move(external));
++        }
+         const auto session = m_loadingSession;
+         m_tracksFuture = QtConcurrent::run([session]() {
+             QThread::currentThread()->setPriority(QThread::LowPriority);
+@@ -643,6 +920,18 @@ void RekordboxFeature::onRekordboxDevicesFound() {
              continue;
          }
          m_devices.insert(device.snapshot.root, device.snapshot);
 +        if (device.snapshot.folderOnly) {
 +            // Re-assert the read-only boundary on the GUI thread as well.
-+            mixxx::rekordbox::setFolderOnlyRoot(device.snapshot.root, true);
++            mixxx::rekordbox::setReadOnlySourceRoot(device.snapshot.root, true);
 +            additions.push_back(std::make_unique<TreeItem>(device.label,
 +                    QVariant(QVariantList{device.snapshot.root,
 +                            kFolderDeviceItem,
 +                            kStatusReady,
 +                            -1,
-+                            -1})));
++                            -1,
++                            kKindFolder})));
 +            continue;
 +        }
          additions.push_back(std::make_unique<TreeItem>(device.label,
                  QVariant(QVariantList{device.snapshot.root,
                          kDeviceItem,
-@@ -657,7 +750,8 @@ void RekordboxFeature::onRekordboxDevicesFound() {
+@@ -650,14 +939,17 @@ void RekordboxFeature::onRekordboxDevicesFound() {
+                                 ? kStatusPreparing
+                                 : kStatusError,
+                         -1,
+-                        -1})));
++                        -1,
++                        device.snapshot.externalKind == kKindLibrary ? kKindLibrary
++                                                                    : kKindRekordbox})));
+     }
+     if (!additions.empty()) {
+         m_pSidebarModel->insertTreeItemRows(
                  std::move(additions), root->childRows());
      }
      for (const auto& device : found) {
@@ -441,10 +1716,10 @@ index 05046e4..aaebebf 100644
          }
      }
 diff --git a/src/library/rekordbox/rekordboxfeature.h b/src/library/rekordbox/rekordboxfeature.h
-index 164d5d7..59b97ec 100644
+index 164d5d7..1de8233 100644
 --- a/src/library/rekordbox/rekordboxfeature.h
 +++ b/src/library/rekordbox/rekordboxfeature.h
-@@ -36,6 +36,11 @@ class RekordboxFeature final : public LibraryFeature {
+@@ -36,6 +36,27 @@ class RekordboxFeature final : public LibraryFeature {
      TreeItemModel* sidebarModel() const override;
      std::shared_ptr<const mixxx::rekordbox::RuntimeCatalog> catalogForRoot(
              const QString& root) const;
@@ -453,20 +1728,986 @@ index 164d5d7..59b97ec 100644
 +        return m_devices.contains(root) && m_devices.value(root).folderOnly &&
 +                m_devices.value(root).state == mixxx::rekordbox::DeviceState::Readable;
 +    }
++    // Folder-only USBs and Traktor / rekordbox XML libraries: never written.
++    bool isReadOnlySource(const QString& root) const {
++        return m_devices.contains(root) &&
++                (m_devices.value(root).folderOnly ||
++                        !m_devices.value(root).externalKind.isEmpty());
++    }
++    // "library" for a library file on this computer, "usb" otherwise.
++    QString sourceKind(const QString& root) const {
++        return m_devices.value(root).externalKind == QStringLiteral("library")
++                ? QStringLiteral("library")
++                : QStringLiteral("usb");
++    }
++    bool externalLibrariesEnabled() const;
++    // Native dialogs: add (or remove, if already added) a Traktor collection
++    // or rekordbox XML file, plus the music folder permission on macOS.
++    void addExternalLibrary();
      std::optional<mixxx::rekordbox::RuntimeTrack> infoForLocation(const QString& location,QString* root) const;
      TrackPointer temporaryTrackForRoot(const QString& root,quint32 id,QString* error=nullptr) const {
          const auto session=m_sessions.value(root);return session?session->createTemporaryTrack(id,error):TrackPointer();
-@@ -68,6 +73,7 @@ class RekordboxFeature final : public LibraryFeature {
+@@ -68,6 +89,9 @@ class RekordboxFeature final : public LibraryFeature {
      void setDeviceStatus(const QString& root, const QString& status,
              int songs = -1, int playlists = -1);
      void authorizeVolume(const QString& root);
 +    bool folderUsbSourcesEnabled() const;
++    QStringList storedExternalLibraries() const;
++    void storeExternalLibraries(const QStringList& files);
  
      parented_ptr<TreeItemModel> m_pSidebarModel;
      mixxx::rekordbox::RekordboxRuntimeTrackModel m_runtimeTrackModel;
+diff --git a/src/library/rekordbox/rekordboxtrackadapter.cpp b/src/library/rekordbox/rekordboxtrackadapter.cpp
+index 9b67f01..ef35338 100644
+--- a/src/library/rekordbox/rekordboxtrackadapter.cpp
++++ b/src/library/rekordbox/rekordboxtrackadapter.cpp
+@@ -4,6 +4,7 @@
+ #include <QFile>
+ #include <QtEndian>
+ #include <algorithm>
++#include <cmath>
+ #include <QVector>
+ #include <utility>
+ 
+@@ -17,6 +18,7 @@
+ #include "track/sourcebinding.h"
+ #include "track/track.h"
+ #include "sources/soundsource.h"
++#include "util/sandbox.h"
+ #ifdef __COREAUDIO__
+ #include "sources/soundsourcecoreaudio.h"
+ #endif
+@@ -131,6 +133,94 @@ class RekordboxCueInfoImporter final : public mixxx::CueInfoImporter {
+     double m_offsetMillis{0};
+ };
+ 
++QList<mixxx::CueInfo> cueInfosFor(const RuntimeTrack& runtimeTrack) {
++    QList<mixxx::CueInfo> cueInfos;
++    cueInfos.reserve(runtimeTrack.cues.size());
++    bool mainCueAdded = false;
++    for (const auto& cue : runtimeTrack.cues) {
++        if (!cue.startMs) {
++            continue;
++        }
++        mixxx::CueType type = mixxx::CueType::Invalid;
++        std::optional<int> hotCueIndex;
++        switch (cue.kind) {
++        case RuntimeCue::Kind::HotCue:
++            type = mixxx::CueType::HotCue;
++            hotCueIndex = cue.hotcueIndex - 1;
++            break;
++        case RuntimeCue::Kind::HotLoop:
++            type = mixxx::CueType::Loop;
++            hotCueIndex = cue.hotcueIndex - 1;
++            break;
++        case RuntimeCue::Kind::MemoryCue:
++            if (!mainCueAdded) {
++                cueInfos.append(mixxx::CueInfo(mixxx::CueType::MainCue, cue.startMs,
++                        std::nullopt, std::nullopt, cue.label, cue.color));
++                mainCueAdded = true;
++            }
++            type = mixxx::CueType::MemoryCue;
++            break;
++        case RuntimeCue::Kind::MemoryLoop:
++            type = cue.activeLoop ? mixxx::CueType::ActiveLoop : mixxx::CueType::MemoryLoop;
++            break;
++        }
++        if ((hotCueIndex && (*hotCueIndex < mixxx::kFirstHotCueIndex ||
++                                    *hotCueIndex >= 8)) ||
++                ((cue.kind == RuntimeCue::Kind::HotLoop ||
++                         cue.kind == RuntimeCue::Kind::MemoryLoop) &&
++                        (!cue.endMs || *cue.endMs <= *cue.startMs))) {
++            continue;
++        }
++        cueInfos.append(mixxx::CueInfo(type,
++                cue.startMs,
++                cue.endMs,
++                hotCueIndex,
++                cue.label,
++                cue.color));
++    }
++    return cueInfos;
++}
++
++// Constant beatgrid from a library's BPM and first-beat position.
++class ConstGridBeatsImporter final : public mixxx::BeatsImporter {
++  public:
++    ConstGridBeatsImporter(double bpm, double firstBeatMillis)
++            : m_bpm(bpm),
++              m_firstBeatMillis(firstBeatMillis) {
++    }
++    bool isEmpty() const override {
++        return !(m_bpm > 0) || !std::isfinite(m_bpm) || !std::isfinite(m_firstBeatMillis);
++    }
++    void setSourceTimingOffsetMillis(double offset) override {
++        m_offsetMillis = offset;
++    }
++    mixxx::BeatsPointer importBeatsAndApplyTimingOffset(
++            const QString&,
++            const QString&,
++            const mixxx::audio::StreamInfo& streamInfo) override {
++        const auto& signalInfo = streamInfo.getSignalInfo();
++        if (isEmpty() || !signalInfo.getSampleRate().isValid()) {
++            return nullptr;
++        }
++        const double beatMillis = 60000.0 / m_bpm;
++        double anchorMillis = m_firstBeatMillis + m_offsetMillis;
++        if (anchorMillis < 0) {
++            anchorMillis += std::ceil(-anchorMillis / beatMillis) * beatMillis;
++        }
++        const auto anchor = mixxx::audio::FramePos(
++                signalInfo.millis2frames(anchorMillis)).toNearestFrameBoundary();
++        return mixxx::Beats::fromConstTempo(signalInfo.getSampleRate(),
++                anchor,
++                mixxx::Bpm(m_bpm),
++                QStringLiteral("NauticMixxx-external-grid"));
++    }
++
++  private:
++    double m_bpm;
++    double m_firstBeatMillis;
++    double m_offsetMillis{0};
++};
++
+ } // namespace
+ 
+ std::optional<Mp3TimingInfo> readMp3TimingInfo(const QString& path) {
+@@ -268,50 +358,7 @@ TrackPointer RekordboxTrackAdapter::createTemporaryTrack(
+                 std::make_shared<RekordboxBeatsImporter>(runtimeTrack.beats),
+                 false);
+     }
+-    QList<mixxx::CueInfo> cueInfos;
+-    cueInfos.reserve(runtimeTrack.cues.size());
+-    bool mainCueAdded = false;
+-    for (const auto& cue : runtimeTrack.cues) {
+-        if (!cue.startMs) {
+-            continue;
+-        }
+-        mixxx::CueType type = mixxx::CueType::Invalid;
+-        std::optional<int> hotCueIndex;
+-        switch (cue.kind) {
+-        case RuntimeCue::Kind::HotCue:
+-            type = mixxx::CueType::HotCue;
+-            hotCueIndex = cue.hotcueIndex - 1;
+-            break;
+-        case RuntimeCue::Kind::HotLoop:
+-            type = mixxx::CueType::Loop;
+-            hotCueIndex = cue.hotcueIndex - 1;
+-            break;
+-        case RuntimeCue::Kind::MemoryCue:
+-            if (!mainCueAdded) {
+-                cueInfos.append(mixxx::CueInfo(mixxx::CueType::MainCue, cue.startMs,
+-                        std::nullopt, std::nullopt, cue.label, cue.color));
+-                mainCueAdded = true;
+-            }
+-            type = mixxx::CueType::MemoryCue;
+-            break;
+-        case RuntimeCue::Kind::MemoryLoop:
+-            type = cue.activeLoop ? mixxx::CueType::ActiveLoop : mixxx::CueType::MemoryLoop;
+-            break;
+-        }
+-        if ((hotCueIndex && (*hotCueIndex < mixxx::kFirstHotCueIndex ||
+-                                    *hotCueIndex >= 8)) ||
+-                ((cue.kind == RuntimeCue::Kind::HotLoop ||
+-                         cue.kind == RuntimeCue::Kind::MemoryLoop) &&
+-                        (!cue.endMs || *cue.endMs <= *cue.startMs))) {
+-            continue;
+-        }
+-        cueInfos.append(mixxx::CueInfo(type,
+-                cue.startMs,
+-                cue.endMs,
+-                hotCueIndex,
+-                cue.label,
+-                cue.color));
+-    }
++    QList<mixxx::CueInfo> cueInfos = cueInfosFor(runtimeTrack);
+     if (!cueInfos.isEmpty()) {
+         track->importCueInfos(
+                 std::make_unique<RekordboxCueInfoImporter>(std::move(cueInfos)));
+@@ -333,4 +380,77 @@ TrackPointer RekordboxTrackAdapter::createTemporaryTrack(
+     return track;
+ }
+ 
++TrackPointer RekordboxTrackAdapter::createExternalTemporaryTrack(
++        const RuntimeTrack& runtimeTrack,
++        QString* error) {
++    if (error) {
++        error->clear();
++    }
++    const auto fail = [error](const QString& message) -> TrackPointer {
++        if (error) {
++            *error = message;
++        }
++        return {};
++    };
++    if (runtimeTrack.rekordboxId == 0 || runtimeTrack.resolvedAudioPath.isEmpty()) {
++        return fail(QStringLiteral("The audio file of this library track was not found"));
++    }
++    mixxx::FileInfo fileInfo(runtimeTrack.resolvedAudioPath);
++    if (!fileInfo.checkFileExists() || !QFileInfo(runtimeTrack.resolvedAudioPath).isFile()) {
++        return fail(QStringLiteral("Library track audio file is missing"));
++    }
++    // Library music usually lives outside removable volumes: reuse any folder
++    // permission the user granted (sandboxed macOS builds).
++    auto token = Sandbox::openSecurityToken(&fileInfo, true);
++    auto track = Track::newTemporary(
++            mixxx::FileAccess(fileInfo, std::move(token)),
++            mixxx::TrackUsePolicy::usbFolderPolicy(),
++            mixxx::SourceBinding::standardLibrary());
++    if (!track) {
++        return fail(QStringLiteral("Cannot create read-only temporary track"));
++    }
++    const auto provider = runtimeTrack.rawMetadata.value(QStringLiteral("provider")).toString();
++    // rekordbox XML positions share rekordbox's MP3 timeline (see the decoder
++    // offset applied to rekordbox USB tracks); Traktor positions do not.
++    track->setProperty("rekordboxTimingSemantics", provider == QStringLiteral("rekordbox_xml"));
++    track->setProperty("externalLibraryProvider", provider);
++    track->setTitle(runtimeTrack.title);
++    track->setArtist(runtimeTrack.artist);
++    track->setAlbum(runtimeTrack.album);
++    track->updateGenre(runtimeTrack.genre);
++    track->setComment(runtimeTrack.comment);
++    track->setComposer(runtimeTrack.composer);
++    const auto year = runtimeTrack.rawMetadata.value(QStringLiteral("year")).toString();
++    if (!year.isEmpty()) {
++        track->setYear(year);
++    }
++    if (runtimeTrack.durationSeconds && *runtimeTrack.durationSeconds > 0) {
++        track->setDuration(static_cast<double>(*runtimeTrack.durationSeconds));
++    }
++    if (runtimeTrack.rating) {
++        track->setRating(static_cast<int>(*runtimeTrack.rating));
++    }
++    if (!runtimeTrack.key.isEmpty()) {
++        track->setKeyText(runtimeTrack.key, mixxx::track::io::key::FILE_METADATA);
++    }
++    const double gridBpm = runtimeTrack.rawMetadata.value(QStringLiteral("grid_bpm")).toDouble();
++    if (gridBpm > 0 && runtimeTrack.rawMetadata.contains(QStringLiteral("grid_ms"))) {
++        track->tryImportBeats(std::make_shared<ConstGridBeatsImporter>(gridBpm,
++                                      runtimeTrack.rawMetadata.value(QStringLiteral("grid_ms"))
++                                              .toDouble()),
++                false);
++    } else if (runtimeTrack.beats.size() >= 2) {
++        track->tryImportBeats(
++                std::make_shared<RekordboxBeatsImporter>(runtimeTrack.beats),
++                false);
++    }
++    QList<mixxx::CueInfo> cueInfos = cueInfosFor(runtimeTrack);
++    if (!cueInfos.isEmpty()) {
++        track->importCueInfos(
++                std::make_unique<RekordboxCueInfoImporter>(std::move(cueInfos)));
++    }
++    track->markClean();
++    return track;
++}
++
+ } // namespace mixxx::rekordbox
+diff --git a/src/library/rekordbox/rekordboxtrackadapter.h b/src/library/rekordbox/rekordboxtrackadapter.h
+index a4732fa..aa6dcf8 100644
+--- a/src/library/rekordbox/rekordboxtrackadapter.h
++++ b/src/library/rekordbox/rekordboxtrackadapter.h
+@@ -23,6 +23,12 @@ class RekordboxTrackAdapter final {
+             const std::shared_ptr<const SessionState>& sessionState,
+             QList<LoadedRuntimeWaveform> waveforms,
+             QString* error);
++    // Traktor NML / rekordbox XML track: temporary, never persisted or
++    // exported; Mixxx analyzes it in memory for the waveform. Cues and the
++    // library's beatgrid are imported.
++    static TrackPointer createExternalTemporaryTrack(
++            const RuntimeTrack& runtimeTrack,
++            QString* error);
+ };
+ 
+ } // namespace mixxx::rekordbox
+diff --git a/src/library/rekordbox/rekordboxusbsession.cpp b/src/library/rekordbox/rekordboxusbsession.cpp
+index 7e997e7..c037de3 100644
+--- a/src/library/rekordbox/rekordboxusbsession.cpp
++++ b/src/library/rekordbox/rekordboxusbsession.cpp
+@@ -10,6 +10,7 @@
+ #include <algorithm>
+ #include <functional>
+ 
++#include "library/rekordbox/externalcatalog.h"
+ #include "library/rekordbox/rekordboxanlzreader.h"
+ #include "library/rekordbox/rekordboxdatabase.h"
+ #include "library/rekordbox/rekordboxratingwriter.h"
+@@ -271,16 +272,88 @@ bool populate(const QString& root, const QString& sessionId, const DatabaseDocum
+ } // namespace
+ 
+ RekordboxUsbSession::RekordboxUsbSession(const QString& root)
+-        : m_root(root.isEmpty() ? QString() : QFileInfo(root).absoluteFilePath()),
++        : m_external(false),
++          m_root(root.isEmpty() ? QString() : QFileInfo(root).absoluteFilePath()),
+           m_sessionState(std::make_shared<SessionState>()),
+           m_sessionId(m_sessionState->identifier().uuid().toString(QUuid::WithoutBraces)) {
+ }
+ 
++RekordboxUsbSession::RekordboxUsbSession(const QString& root, ExternalSessionSource external)
++        : m_external(true),
++          m_externalSource(std::move(external)),
++          m_root(root.isEmpty() ? QString() : QFileInfo(root).absoluteFilePath()),
++          m_sessionState(std::make_shared<SessionState>()),
++          m_sessionId(m_sessionState->identifier().uuid().toString(QUuid::WithoutBraces)) {
++}
++
++namespace {
++const QString kReadOnlyLibrary = QStringLiteral("This library is read-only in NauticMixxx.");
++} // namespace
++
++bool RekordboxUsbSession::loadExternal(const QString& root) {
++    const auto fail = [&](UsbSessionState state, UsbSessionError code, const QString& error) {
++        const std::lock_guard<std::mutex> lock(m_mutex);
++        if (m_state != UsbSessionState::Invalidated) {
++            m_state = state;
++            m_errorCode = code;
++            m_error = error;
++        }
++        return false;
++    };
++    if (root.isEmpty() || !QFileInfo::exists(root) || m_externalSource.files.isEmpty()) {
++        return fail(UsbSessionState::Missing, UsbSessionError::MissingDevice,
++                QStringLiteral("Library is missing"));
++    }
++    for (const auto& file : m_externalSource.files) {
++        if (!QFileInfo(file).isReadable()) {
++            return fail(UsbSessionState::Unreadable, UsbSessionError::UnreadableDevice,
++                    QStringLiteral("Library file is unreadable: %1").arg(file));
++        }
++    }
++    // Every source is read-only before any track can be projected from it.
++    setReadOnlySourceRoot(root, true);
++    if (!m_externalSource.volumeRoot.isEmpty()) {
++        setReadOnlySourceRoot(m_externalSource.volumeRoot, true);
++    }
++    const auto fingerprint = externalCatalogFingerprint(m_externalSource.files);
++    ExternalCatalogOptions options;
++    options.volumeRoot = m_externalSource.volumeRoot.isEmpty()
++            ? QString()
++            : QFileInfo(m_externalSource.volumeRoot).canonicalFilePath();
++    options.includeFolderCategory = m_externalSource.includeFolderCategory;
++    QString error;
++    auto catalog = buildExternalCatalog(m_externalSource.files, options, &error);
++    if (!catalog) {
++        return fail(UsbSessionState::Error, UsbSessionError::CorruptExport, error);
++    }
++    if (!error.isEmpty()) {
++        qWarning() << "External library loaded with warnings:" << error;
++    }
++    const std::lock_guard<std::mutex> lock(m_mutex);
++    if (m_state == UsbSessionState::Invalidated) {
++        catalog->invalidate();
++        return false;
++    }
++    DeviceSnapshot snapshot;
++    snapshot.root = QFileInfo(root).canonicalFilePath();
++    snapshot.state = DeviceState::Readable;
++    snapshot.fingerprint = fingerprint;
++    snapshot.externalKind = m_externalSource.kind;
++    snapshot.externalFiles = m_externalSource.files;
++    m_snapshot = snapshot;
++    m_catalog = std::move(catalog);
++    m_state = UsbSessionState::Ready;
++    return true;
++}
++
+ RekordboxUsbSession::~RekordboxUsbSession() {
+     invalidate();
+ }
+ 
+ QString RekordboxUsbSession::writeList(const QString& name, const QList<quint32>& ids, bool history) {
++    if (m_external) {
++        return kReadOnlyLibrary;
++    }
+     const std::lock_guard<std::mutex> lock(m_mutex);
+     if (m_state != UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive()) return "USB session is unavailable.";
+     quint32 id = 0; const auto error = writeUsbList(&m_snapshot, name, ids, history, &id);
+@@ -292,6 +365,9 @@ QString RekordboxUsbSession::writeList(const QString& name, const QList<quint32>
+ }
+ 
+ QString RekordboxUsbSession::writePerformance(const PerformanceEdit& edit) {
++    if (m_external) {
++        return kReadOnlyLibrary;
++    }
+     const std::lock_guard<std::mutex> lock(m_mutex);
+     if (m_state != UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive()) return "USB session is unavailable.";
+     auto track = m_catalog->findTrack(edit.trackId);
+@@ -305,6 +381,9 @@ QString RekordboxUsbSession::writePerformance(const PerformanceEdit& edit) {
+ }
+ 
+ QString RekordboxUsbSession::writeRating(quint32 trackId,int rating) {
++    if (m_external) {
++        return kReadOnlyLibrary;
++    }
+     const std::lock_guard<std::mutex> lock(m_mutex);
+     if(m_state!=UsbSessionState::Ready || !m_catalog || !m_sessionState->isActive())
+         return QStringLiteral("USB session is unavailable.");
+@@ -329,6 +408,9 @@ bool RekordboxUsbSession::load() {
+         m_state = UsbSessionState::Parsing;
+         root = m_root;
+     }
++    if (m_external) {
++        return loadExternal(root);
++    }
+     const auto fail = [&](UsbSessionState state, UsbSessionError code, const QString& error) {
+         const std::lock_guard<std::mutex> lock(m_mutex);
+         if (m_state != UsbSessionState::Invalidated) {
+@@ -412,6 +494,20 @@ bool RekordboxUsbSession::load() {
+ }
+ 
+ bool RekordboxUsbSession::refresh() {
++    if (m_external) {
++        // Library files may be re-saved (Traktor writes collection.nml on
++        // exit). Discovery rebuilds the catalog; tracks stay loadable while
++        // the source exists.
++        QString root;
++        {
++            const std::lock_guard<std::mutex> lock(m_mutex);
++            if (m_state != UsbSessionState::Ready || !m_sessionState->isActive()) {
++                return false;
++            }
++            root = m_root;
++        }
++        return !root.isEmpty() && QFileInfo::exists(root);
++    }
+     DeviceSnapshot expected;
+     QString root;
+     {
+@@ -447,6 +543,9 @@ std::optional<QByteArray> RekordboxUsbSession::loadWaveformPayload(
+         }
+         return std::nullopt;
+     };
++    if (m_external) {
++        return fail(QStringLiteral("External libraries carry no waveform payloads"));
++    }
+     if (!refresh()) {
+         return fail(QStringLiteral("Session or PDB source is no longer valid"));
+     }
+@@ -624,6 +723,9 @@ TrackPointer RekordboxUsbSession::createTemporaryTrack(
+         }
+         return {};
+     }
++    if (m_external) {
++        return RekordboxTrackAdapter::createExternalTemporaryTrack(*runtimeTrack, error);
++    }
+     // Load each native style and preview on demand; mounting stays descriptor-only.
+     const auto waveformPriority = [](const RuntimeWaveform& waveform) {
+         const auto& tag = waveform.sectionTag;
+diff --git a/src/library/rekordbox/rekordboxusbsession.h b/src/library/rekordbox/rekordboxusbsession.h
+index 2dfae07..a1c29df 100644
+--- a/src/library/rekordbox/rekordboxusbsession.h
++++ b/src/library/rekordbox/rekordboxusbsession.h
+@@ -21,9 +21,22 @@ enum class UsbSessionError {
+ // invalidate() on removal; reconnect always constructs a new session.
+ struct PerformanceEdit;
+ 
++// A Traktor NML / rekordbox XML catalog served through the same browser as a
++// USB export. Always read-only: no writes, temporary non-persisted tracks.
++struct ExternalSessionSource {
++    QStringList files;
++    QString volumeRoot; // USB catalogs resolve audio inside this volume first
++    QString kind;       // "usb" or "library"
++    bool includeFolderCategory{false};
++};
++
+ class RekordboxUsbSession final {
+   public:
+     explicit RekordboxUsbSession(const QString& root);
++    RekordboxUsbSession(const QString& root, ExternalSessionSource external);
++    bool isExternal() const {
++        return m_external;
++    }
+     ~RekordboxUsbSession();
+     RekordboxUsbSession(const RekordboxUsbSession&) = delete;
+     RekordboxUsbSession& operator=(const RekordboxUsbSession&) = delete;
+@@ -59,6 +72,9 @@ class RekordboxUsbSession final {
+ 
+   private:
+     void invalidateLocked();
++    bool loadExternal(const QString& root);
++    const bool m_external{false};
++    const ExternalSessionSource m_externalSource;
+     mutable std::mutex m_mutex;
+     QString m_root;
+     const std::shared_ptr<SessionState> m_sessionState;
+diff --git a/src/sources/soundsourceproxy.cpp b/src/sources/soundsourceproxy.cpp
+index c7bb7fd..02d17ec 100644
+--- a/src/sources/soundsourceproxy.cpp
++++ b/src/sources/soundsourceproxy.cpp
+@@ -953,8 +953,10 @@ mixxx::AudioSourcePointer SoundSourceProxy::openAudioSource(
+         return nullptr;
+     }
+     // Overwrite metadata with actual audio properties
++    // rekordbox XML libraries share the rekordbox USB position semantics.
+     const double importedSourceTimingOffsetMillis =
+-            m_pTrack->getSourceBinding().sourceType() == mixxx::SourceType::RekordboxUsb
++            (m_pTrack->getSourceBinding().sourceType() == mixxx::SourceType::RekordboxUsb ||
++                    m_pTrack->property("rekordboxTimingSemantics").toBool())
+             ? mixxx::rekordbox::decoderTimingOffsetMillis(*m_pSoundSource)
+             : 0.0;
+     m_pTrack->setProperty("rekordboxTimingOffsetMillis", importedSourceTimingOffsetMillis);
+diff --git a/src/test/rx3externalcatalog_test.cpp b/src/test/rx3externalcatalog_test.cpp
+new file mode 100644
+index 0000000..825ce29
+--- /dev/null
++++ b/src/test/rx3externalcatalog_test.cpp
+@@ -0,0 +1,336 @@
++#include <gtest/gtest.h>
++
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QSet>
++#include <QTemporaryDir>
++#include <QThread>
++
++#include "library/rekordbox/externalcatalog.h"
++
++namespace {
++using namespace mixxx::rekordbox;
++
++QString write(const QString& path, const QByteArray& bytes) {
++    EXPECT_TRUE(QDir().mkpath(QFileInfo(path).absolutePath()));
++    QFile file(path);
++    EXPECT_TRUE(file.open(QIODevice::WriteOnly));
++    EXPECT_EQ(file.write(bytes), bytes.size());
++    return path;
++}
++
++ExternalCatalogOptions existing(const QSet<QString>& paths, const QString& volumeRoot = {}) {
++    ExternalCatalogOptions options;
++    options.volumeRoot = volumeRoot;
++    options.fileExists = [paths](const QString& path) {
++        return paths.contains(QDir::cleanPath(path));
++    };
++    return options;
++}
++
++std::optional<RuntimeTrack> trackByTitle(const RuntimeCatalog& catalog, const QString& title) {
++    const auto tracks = catalog.tracks();
++    for (const auto& track : tracks) {
++        if (track.title == title) {
++            return track;
++        }
++    }
++    return std::nullopt;
++}
++
++const QByteArray kTraktorCollection = R"(<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
++<NML VERSION="19"><HEAD COMPANY="www.native-instruments.com" PROGRAM="Traktor"></HEAD>
++<COLLECTION ENTRIES="3">
++<ENTRY TITLE="Alpha" ARTIST="Artist A">
++<LOCATION DIR="/:Users/:dj/:Music/:" FILE="alpha.mp3" VOLUME="Macintosh HD" VOLUMEID="x"></LOCATION>
++<ALBUM TRACK="1" TITLE="Album A"></ALBUM>
++<INFO GENRE="House" KEY="11m" PLAYTIME="372" RANKING="255" LABEL="Label A" RELEASE_DATE="2019/3/8" IMPORT_DATE="2024/5/1"></INFO>
++<TEMPO BPM="124.000000" BPM_QUALITY="100"></TEMPO>
++<CUE_V2 NAME="AutoGrid" TYPE="4" START="129.5" LEN="0" REPEATS="-1" HOTCUE="0"></CUE_V2>
++<CUE_V2 NAME="Load" TYPE="3" START="250" LEN="0" REPEATS="-1" HOTCUE="-1"></CUE_V2>
++<CUE_V2 NAME="Drop" TYPE="0" START="60000" LEN="0" REPEATS="-1" HOTCUE="1"></CUE_V2>
++<CUE_V2 NAME="Roll" TYPE="5" START="90000" LEN="7741.9" REPEATS="-1" HOTCUE="2"></CUE_V2>
++<CUE_V2 NAME="n.n." TYPE="5" START="120000" LEN="3870.9" REPEATS="-1" HOTCUE="-1"></CUE_V2>
++</ENTRY>
++<ENTRY TITLE="Beta" ARTIST="Artist B">
++<LOCATION DIR="/:Music/:" FILE="beta.flac" VOLUME="DJUSB" VOLUMEID="y"></LOCATION>
++<INFO GENRE="Techno" PLAYTIME="400"></INFO>
++<TEMPO BPM="130.5"></TEMPO>
++<MUSICAL_KEY VALUE="21"></MUSICAL_KEY>
++</ENTRY>
++<ENTRY TITLE="Gamma" ARTIST="Artist C">
++<LOCATION DIR="/:Users/:dj/:Gone/:" FILE="gamma.mp3" VOLUME="Macintosh HD"></LOCATION>
++</ENTRY>
++</COLLECTION>
++<PLAYLISTS><NODE TYPE="FOLDER" NAME="$ROOT"><SUBNODES COUNT="2">
++<NODE TYPE="FOLDER" NAME="Gigs"><SUBNODES COUNT="1">
++<NODE TYPE="PLAYLIST" NAME="Friday"><PLAYLIST ENTRIES="3" TYPE="LIST" UUID="1">
++<ENTRY><PRIMARYKEY TYPE="TRACK" KEY="DJUSB/:Music/:beta.flac"></PRIMARYKEY></ENTRY>
++<ENTRY><PRIMARYKEY TYPE="TRACK" KEY="Macintosh HD/:Users/:dj/:Music/:alpha.mp3"></PRIMARYKEY></ENTRY>
++<ENTRY><PRIMARYKEY TYPE="TRACK" KEY="Unknown/:nothing.mp3"></PRIMARYKEY></ENTRY>
++</PLAYLIST></NODE>
++</SUBNODES></NODE>
++<NODE TYPE="SMARTLIST" NAME="Smart"><SMARTLIST UUID="2"></SMARTLIST></NODE>
++<NODE TYPE="PLAYLIST" NAME="Warmup"><PLAYLIST ENTRIES="1" TYPE="LIST" UUID="3">
++<ENTRY><PRIMARYKEY TYPE="TRACK" KEY="Macintosh HD/:Users/:dj/:Gone/:gamma.mp3"></PRIMARYKEY></ENTRY>
++</PLAYLIST></NODE>
++</SUBNODES></NODE></PLAYLISTS>
++</NML>
++)";
++
++const QByteArray kRekordboxXml = R"(<?xml version="1.0" encoding="UTF-8"?>
++<DJ_PLAYLISTS Version="1.0.0">
++<PRODUCT Name="rekordbox" Version="6.7.4" Company="AlphaTheta"/>
++<COLLECTION Entries="2">
++<TRACK TrackID="11" Name="Delta" Artist="Artist D" Album="Album D" Genre="Deep" TotalTime="300" Year="2021" AverageBpm="122.00" DateAdded="2023-01-02" Rating="153" Location="file://localhost/Volumes/OLDUSB/Music/My%20Delta.mp3" Tonality="8A" Label="Label D">
++<TEMPO Inizio="0.050" Bpm="122.00" Metro="4/4" Battito="1"/>
++<TEMPO Inizio="60.050" Bpm="122.00" Metro="4/4" Battito="1"/>
++<POSITION_MARK Name="" Type="0" Start="0.050" Num="-1"/>
++<POSITION_MARK Name="Intro" Type="0" Start="16.100" Num="0" Red="40" Green="226" Blue="20"/>
++<POSITION_MARK Name="Loop" Type="4" Start="32.000" End="39.869" Num="1" Red="255" Green="0" Blue="0"/>
++<POSITION_MARK Name="Mem loop" Type="4" Start="64.000" End="72.000" Num="-1"/>
++</TRACK>
++<TRACK TrackID="12" Name="Epsilon" Artist="Artist E" TotalTime="10" AverageBpm="125.00" Location="file://localhost/Users/dj/Music/epsilon.wav">
++<TEMPO Inizio="0.000" Bpm="120.00" Metro="4/4" Battito="1"/>
++<TEMPO Inizio="4.000" Bpm="150.00" Metro="4/4" Battito="1"/>
++</TRACK>
++</COLLECTION>
++<PLAYLISTS>
++<NODE Type="0" Name="ROOT" Count="2">
++<NODE Name="Crates" Type="0" Count="1">
++<NODE Name="Peak" Type="1" KeyType="0" Entries="2"><TRACK Key="12"/><TRACK Key="11"/></NODE>
++</NODE>
++<NODE Name="By path" Type="1" KeyType="1" Entries="1"><TRACK Key="file://localhost/Users/dj/Music/epsilon.wav"/></NODE>
++</NODE>
++</PLAYLISTS>
++</DJ_PLAYLISTS>
++)";
++} // namespace
++
++TEST(Rx3ExternalCatalogTest, TraktorCollectionTracksCuesGridAndPlaylists) {
++    QTemporaryDir directory;
++    ASSERT_TRUE(directory.isValid());
++    const auto nml = write(directory.filePath("collection.nml"), kTraktorCollection);
++    EXPECT_EQ(ExternalCatalogKind::TraktorNml, detectExternalCatalog(nml));
++
++    QString error;
++    const auto catalog = buildExternalCatalog({nml},
++            existing({"/Users/dj/Music/alpha.mp3", "/Volumes/DJUSB/Music/beta.flac"}),
++            &error);
++    ASSERT_TRUE(catalog) << error.toStdString();
++    EXPECT_TRUE(catalog->sealed());
++    EXPECT_EQ(3, catalog->tracks().size());
++
++    const auto alpha = trackByTitle(*catalog, "Alpha");
++    ASSERT_TRUE(alpha);
++    EXPECT_EQ(QStringLiteral("/Users/dj/Music/alpha.mp3"), alpha->resolvedAudioPath);
++    EXPECT_EQ(QStringLiteral("Artist A"), alpha->artist);
++    EXPECT_EQ(QStringLiteral("Album A"), alpha->album);
++    EXPECT_EQ(QStringLiteral("House"), alpha->genre);
++    EXPECT_EQ(QStringLiteral("11m"), alpha->key);
++    EXPECT_EQ(372u, alpha->durationSeconds.value_or(0));
++    EXPECT_EQ(5u, alpha->rating.value_or(0));
++    EXPECT_DOUBLE_EQ(124.0, alpha->bpm.value_or(0));
++    EXPECT_DOUBLE_EQ(124.0, alpha->rawMetadata.value("grid_bpm").toDouble());
++    EXPECT_DOUBLE_EQ(129.5, alpha->rawMetadata.value("grid_ms").toDouble());
++    EXPECT_EQ(QStringLiteral("traktor"), alpha->rawMetadata.value("provider").toString());
++    EXPECT_EQ(QStringLiteral("Label A"), alpha->rawMetadata.value("label").toString());
++    EXPECT_EQ(QStringLiteral("2024-5-1"), alpha->rawMetadata.value("date_added").toString());
++    EXPECT_EQ(QStringLiteral("2019"), alpha->rawMetadata.value("year").toString());
++
++    // Grid marker is not a cue; the load marker becomes the first memory cue.
++    ASSERT_EQ(4, alpha->cues.size());
++    EXPECT_EQ(RuntimeCue::Kind::MemoryCue, alpha->cues[0].kind);
++    EXPECT_DOUBLE_EQ(250.0, alpha->cues[0].startMs.value_or(-1));
++    EXPECT_EQ(RuntimeCue::Kind::HotCue, alpha->cues[1].kind);
++    EXPECT_EQ(2, alpha->cues[1].hotcueIndex);
++    EXPECT_EQ(QStringLiteral("Drop"), alpha->cues[1].label);
++    EXPECT_EQ(RuntimeCue::Kind::HotLoop, alpha->cues[2].kind);
++    EXPECT_EQ(3, alpha->cues[2].hotcueIndex);
++    EXPECT_NEAR(97741.9, alpha->cues[2].endMs.value_or(0), 0.001);
++    EXPECT_EQ(RuntimeCue::Kind::MemoryLoop, alpha->cues[3].kind);
++    EXPECT_TRUE(alpha->cues[3].label.isEmpty());
++
++    const auto beta = trackByTitle(*catalog, "Beta");
++    ASSERT_TRUE(beta);
++    EXPECT_EQ(QStringLiteral("/Volumes/DJUSB/Music/beta.flac"), beta->resolvedAudioPath);
++    EXPECT_EQ(QStringLiteral("Am"), beta->key);
++    EXPECT_FALSE(beta->rawMetadata.contains("grid_ms"));
++
++    const auto gamma = trackByTitle(*catalog, "Gamma");
++    ASSERT_TRUE(gamma);
++    EXPECT_TRUE(gamma->resolvedAudioPath.isEmpty());
++
++    const auto playlists = catalog->playlists();
++    ASSERT_EQ(2, playlists.size());
++    EXPECT_EQ(QStringLiteral("Gigs"), playlists[0].name);
++    EXPECT_TRUE(playlists[0].isFolder);
++    ASSERT_EQ(1, playlists[0].children.size());
++    EXPECT_EQ(QStringLiteral("Friday"), playlists[0].children[0].name);
++    EXPECT_EQ((QList<quint32>{beta->rekordboxId, alpha->rekordboxId}),
++            playlists[0].children[0].trackIds);
++    EXPECT_EQ(QStringLiteral("Warmup"), playlists[1].name);
++    EXPECT_EQ(QList<quint32>{gamma->rekordboxId}, playlists[1].trackIds);
++    EXPECT_TRUE(catalog->findPlaylist(playlists[0].children[0].rekordboxId));
++
++    QStringList labels;
++    for (const auto& category : catalog->browseMenu().categories) {
++        labels.append(category.label);
++    }
++    EXPECT_TRUE(labels.contains("PLAYLIST"));
++    EXPECT_TRUE(labels.contains("TRACK"));
++    EXPECT_FALSE(labels.contains("FOLDER"));
++}
++
++TEST(Rx3ExternalCatalogTest, ExportedTraktorPlaylistResolvesInsideUsb) {
++    QTemporaryDir directory;
++    ASSERT_TRUE(directory.isValid());
++    const QByteArray exported = R"(<?xml version="1.0" encoding="UTF-8"?>
++<NML VERSION="19"><COLLECTION ENTRIES="1">
++<ENTRY TITLE="Exported" ARTIST="X"><LOCATION DIR="/:Traktor Export/:" FILE="x.mp3" VOLUME="OTHERNAME"></LOCATION></ENTRY>
++</COLLECTION><PLAYLISTS><NODE TYPE="FOLDER" NAME="$ROOT"><SUBNODES COUNT="1">
++<NODE TYPE="PLAYLIST" NAME="Saturday"><PLAYLIST ENTRIES="1" TYPE="LIST">
++<ENTRY><PRIMARYKEY TYPE="TRACK" KEY="OTHERNAME/:Traktor Export/:x.mp3"></PRIMARYKEY></ENTRY>
++</PLAYLIST></NODE></SUBNODES></NODE></PLAYLISTS></NML>)";
++    const auto nml = write(directory.filePath("Traktor Export/Saturday.nml"), exported);
++    auto options = existing({"/media/usb/Traktor Export/x.mp3"}, "/media/usb");
++    options.includeFolderCategory = true;
++    const auto catalog = buildExternalCatalog({nml}, options);
++    ASSERT_TRUE(catalog);
++    const auto track = trackByTitle(*catalog, "Exported");
++    ASSERT_TRUE(track);
++    EXPECT_EQ(QStringLiteral("/media/usb/Traktor Export/x.mp3"), track->resolvedAudioPath);
++    ASSERT_EQ(1, catalog->playlists().size());
++    EXPECT_EQ(QStringLiteral("Saturday"), catalog->playlists()[0].name);
++    EXPECT_EQ(1, catalog->playlists()[0].trackIds.size());
++    QStringList labels;
++    for (const auto& category : catalog->browseMenu().categories) {
++        labels.append(category.label);
++    }
++    EXPECT_TRUE(labels.contains("FOLDER"));
++}
++
++TEST(Rx3ExternalCatalogTest, RekordboxXmlTracksCuesTemposAndPlaylists) {
++    QTemporaryDir directory;
++    ASSERT_TRUE(directory.isValid());
++    const auto xml = write(directory.filePath("rekordbox.xml"), kRekordboxXml);
++    EXPECT_EQ(ExternalCatalogKind::RekordboxXml, detectExternalCatalog(xml));
++
++    const auto catalog = buildExternalCatalog({xml},
++            existing({"/media/usb/Music/My Delta.mp3", "/Users/dj/Music/epsilon.wav"},
++                    "/media/usb"));
++    ASSERT_TRUE(catalog);
++    const auto delta = trackByTitle(*catalog, "Delta");
++    ASSERT_TRUE(delta);
++    // Moved volume: remapped below this USB.
++    EXPECT_EQ(QStringLiteral("/media/usb/Music/My Delta.mp3"), delta->resolvedAudioPath);
++    EXPECT_EQ(QStringLiteral("8A"), delta->key);
++    EXPECT_EQ(3u, delta->rating.value_or(0));
++    EXPECT_EQ(QStringLiteral("2021"), delta->rawMetadata.value("year").toString());
++    EXPECT_EQ(QStringLiteral("rekordbox_xml"), delta->rawMetadata.value("provider").toString());
++    EXPECT_DOUBLE_EQ(122.0, delta->rawMetadata.value("grid_bpm").toDouble());
++    EXPECT_DOUBLE_EQ(50.0, delta->rawMetadata.value("grid_ms").toDouble());
++    ASSERT_EQ(4, delta->cues.size());
++    EXPECT_EQ(RuntimeCue::Kind::MemoryCue, delta->cues[0].kind);
++    EXPECT_EQ(RuntimeCue::Kind::MemoryLoop, delta->cues[1].kind);
++    EXPECT_EQ(RuntimeCue::Kind::HotCue, delta->cues[2].kind);
++    EXPECT_EQ(1, delta->cues[2].hotcueIndex);
++    ASSERT_TRUE(delta->cues[2].color);
++    EXPECT_EQ(0x28E214u, static_cast<quint32>(*delta->cues[2].color));
++    EXPECT_EQ(RuntimeCue::Kind::HotLoop, delta->cues[3].kind);
++    EXPECT_EQ(2, delta->cues[3].hotcueIndex);
++    EXPECT_DOUBLE_EQ(39869.0, delta->cues[3].endMs.value_or(0));
++
++    const auto epsilon = trackByTitle(*catalog, "Epsilon");
++    ASSERT_TRUE(epsilon);
++    EXPECT_FALSE(epsilon->rawMetadata.contains("grid_bpm"));
++    // 0..4 s at 120 BPM (8 beats) then 4..10 s at 150 BPM (15 beats).
++    ASSERT_EQ(23, epsilon->beats.size());
++    EXPECT_EQ(0u, epsilon->beats[0].timeMs);
++    EXPECT_EQ(500u, epsilon->beats[1].timeMs);
++    EXPECT_EQ(4000u, epsilon->beats[8].timeMs);
++    EXPECT_EQ(4400u, epsilon->beats[9].timeMs);
++    EXPECT_EQ(15000u, epsilon->beats[9].tempoCentiBpm);
++
++    const auto playlists = catalog->playlists();
++    ASSERT_EQ(2, playlists.size());
++    EXPECT_EQ(QStringLiteral("Crates"), playlists[0].name);
++    ASSERT_EQ(1, playlists[0].children.size());
++    EXPECT_EQ((QList<quint32>{epsilon->rekordboxId, delta->rekordboxId}),
++            playlists[0].children[0].trackIds);
++    EXPECT_EQ(QList<quint32>{epsilon->rekordboxId}, playlists[1].trackIds);
++}
++
++TEST(Rx3ExternalCatalogTest, MergesFilesAndDeduplicatesTracks) {
++    QTemporaryDir directory;
++    ASSERT_TRUE(directory.isValid());
++    const auto nml = write(directory.filePath("collection.nml"), kTraktorCollection);
++    const QByteArray second = R"(<NML VERSION="19"><COLLECTION ENTRIES="1">
++<ENTRY TITLE="Alpha again"><LOCATION DIR="/:Users/:dj/:Music/:" FILE="alpha.mp3" VOLUME="Macintosh HD"></LOCATION></ENTRY>
++</COLLECTION><PLAYLISTS><NODE TYPE="FOLDER" NAME="$ROOT"><SUBNODES COUNT="1">
++<NODE TYPE="PLAYLIST" NAME="Other"><PLAYLIST ENTRIES="1" TYPE="LIST">
++<ENTRY><PRIMARYKEY TYPE="TRACK" KEY="Macintosh HD/:Users/:dj/:Music/:alpha.mp3"></PRIMARYKEY></ENTRY>
++</PLAYLIST></NODE></SUBNODES></NODE></PLAYLISTS></NML>)";
++    const auto other = write(directory.filePath("other.nml"), second);
++    const auto catalog = buildExternalCatalog({nml, other},
++            existing({"/Users/dj/Music/alpha.mp3"}));
++    ASSERT_TRUE(catalog);
++    EXPECT_EQ(3, catalog->tracks().size());
++    const auto alpha = trackByTitle(*catalog, "Alpha");
++    ASSERT_TRUE(alpha);
++    ASSERT_EQ(3, catalog->playlists().size());
++    EXPECT_EQ(QStringLiteral("Other"), catalog->playlists()[2].name);
++    EXPECT_EQ(QList<quint32>{alpha->rekordboxId}, catalog->playlists()[2].trackIds);
++}
++
++TEST(Rx3ExternalCatalogTest, RejectsUnknownAndMalformedFiles) {
++    QTemporaryDir directory;
++    ASSERT_TRUE(directory.isValid());
++    const auto unknown = write(directory.filePath("notes.xml"), "<notes><a/></notes>");
++    EXPECT_EQ(ExternalCatalogKind::Unknown, detectExternalCatalog(unknown));
++    QString error;
++    EXPECT_FALSE(buildExternalCatalog({unknown}, {}, &error));
++    EXPECT_FALSE(error.isEmpty());
++
++    const auto broken = write(directory.filePath("broken.nml"), "<NML><COLLECTION><ENTRY TITLE=\"x\"");
++    error.clear();
++    EXPECT_FALSE(buildExternalCatalog({broken}, {}, &error));
++    EXPECT_FALSE(error.isEmpty());
++    EXPECT_FALSE(buildExternalCatalog({directory.filePath("missing.nml")}, {}, &error));
++}
++
++TEST(Rx3ExternalCatalogTest, FindsLibraryFilesOnUsbAndLocalTraktor) {
++    QTemporaryDir usb;
++    ASSERT_TRUE(usb.isValid());
++    write(usb.filePath("rekordbox.xml"), kRekordboxXml);
++    write(usb.filePath("Traktor Export/Set.nml"), kTraktorCollection);
++    write(usb.filePath("Deep/Deeper/Deepest/too-deep.nml"), kTraktorCollection);
++    write(usb.filePath(".Trashes/old.nml"), kTraktorCollection);
++    write(usb.filePath("other.xml"), "<plist/>");
++    const auto files = findExternalCatalogFiles(usb.path());
++    ASSERT_EQ(2, files.size());
++    EXPECT_TRUE(files[0].endsWith("/Traktor Export/Set.nml") || files[1].endsWith("/Traktor Export/Set.nml"));
++    EXPECT_TRUE(files[0].endsWith("/rekordbox.xml") || files[1].endsWith("/rekordbox.xml"));
++
++    QTemporaryDir documents;
++    ASSERT_TRUE(documents.isValid());
++    write(documents.filePath("Native Instruments/Traktor 3.4.0/collection.nml"), kTraktorCollection);
++    write(documents.filePath("Native Instruments/Traktor 3.11.1/collection.nml"), kTraktorCollection);
++    QDir().mkpath(documents.filePath("Native Instruments/Traktor 4.0.0"));
++    EXPECT_TRUE(findLocalTraktorCollection(documents.path())
++                        .endsWith("/Traktor 3.11.1/collection.nml"));
++    EXPECT_TRUE(findLocalTraktorCollection(usb.path()).isEmpty());
++}
++
++TEST(Rx3ExternalCatalogTest, FingerprintFollowsContentChanges) {
++    QTemporaryDir directory;
++    ASSERT_TRUE(directory.isValid());
++    const auto nml = write(directory.filePath("collection.nml"), kTraktorCollection);
++    const auto first = externalCatalogFingerprint({nml});
++    EXPECT_EQ(first, externalCatalogFingerprint({nml}));
++    write(nml, kTraktorCollection + "<!-- saved again -->");
++    EXPECT_NE(first, externalCatalogFingerprint({nml}));
++    EXPECT_EQ(QStringLiteral("Am"), traktorMusicalKeyText(21));
++    EXPECT_TRUE(traktorMusicalKeyText(24).isEmpty());
++}
+diff --git a/src/test/rx3externaltrack_test.cpp b/src/test/rx3externaltrack_test.cpp
+new file mode 100644
+index 0000000..b2f8121
+--- /dev/null
++++ b/src/test/rx3externaltrack_test.cpp
+@@ -0,0 +1,112 @@
++#include <gtest/gtest.h>
++
++#include <QCryptographicHash>
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QTemporaryDir>
++
++#include "library/rekordbox/rekordboxdevice.h"
++#include "library/rekordbox/rekordboxusbsession.h"
++#include "track/track.h"
++#include "track/trackusepolicy.h"
++
++namespace {
++using namespace mixxx::rekordbox;
++
++QString write(const QString& path, const QByteArray& bytes) {
++    EXPECT_TRUE(QDir().mkpath(QFileInfo(path).absolutePath()));
++    QFile file(path);
++    EXPECT_TRUE(file.open(QIODevice::WriteOnly));
++    EXPECT_EQ(file.write(bytes), bytes.size());
++    return path;
++}
++
++QByteArray digest(const QString& path) {
++    QFile file(path);
++    EXPECT_TRUE(file.open(QIODevice::ReadOnly));
++    return QCryptographicHash::hash(file.readAll(), QCryptographicHash::Sha256);
++}
++} // namespace
++
++TEST(Rx3ExternalTrackTest, TraktorLibraryProjectsReadOnlyTemporaryTracks) {
++    QTemporaryDir usb;
++    ASSERT_TRUE(usb.isValid());
++    const QString root = QFileInfo(usb.path()).canonicalFilePath();
++    const auto audio = write(QDir(root).filePath("Traktor Export/song.mp3"), QByteArray(4096, '\0'));
++    const auto nml = write(QDir(root).filePath("Traktor Export/Set.nml"),
++            R"(<?xml version="1.0" encoding="UTF-8"?>
++<NML VERSION="19"><COLLECTION ENTRIES="1">
++<ENTRY TITLE="Song" ARTIST="Someone"><LOCATION DIR="/:Traktor Export/:" FILE="song.mp3" VOLUME="USB"></LOCATION>
++<INFO KEY="Am" RANKING="204"></INFO><TEMPO BPM="128.0"></TEMPO>
++<CUE_V2 NAME="AutoGrid" TYPE="4" START="12.5" LEN="0" HOTCUE="-1"></CUE_V2>
++<CUE_V2 NAME="Drop" TYPE="0" START="30000" LEN="0" HOTCUE="0"></CUE_V2>
++</ENTRY></COLLECTION><PLAYLISTS><NODE TYPE="FOLDER" NAME="$ROOT"><SUBNODES COUNT="1">
++<NODE TYPE="PLAYLIST" NAME="Set"><PLAYLIST ENTRIES="1" TYPE="LIST">
++<ENTRY><PRIMARYKEY TYPE="TRACK" KEY="USB/:Traktor Export/:song.mp3"></PRIMARYKEY></ENTRY>
++</PLAYLIST></NODE></SUBNODES></NODE></PLAYLISTS></NML>)");
++    const auto audioBefore = digest(audio);
++    const auto nmlBefore = digest(nml);
++
++    ExternalSessionSource source;
++    source.files = {nml};
++    source.volumeRoot = root;
++    source.kind = QStringLiteral("usb");
++    source.includeFolderCategory = true;
++    RekordboxUsbSession session(root, source);
++    ASSERT_TRUE(session.isExternal());
++    ASSERT_TRUE(session.load()) << session.error().toStdString();
++    ASSERT_EQ(UsbSessionState::Ready, session.state());
++    const auto catalog = session.catalog();
++    ASSERT_TRUE(catalog);
++    ASSERT_EQ(1, catalog->tracks().size());
++    const auto id = catalog->tracks().keys().first();
++    EXPECT_EQ(QStringLiteral("usb"), session.deviceSnapshot().externalKind);
++
++    QString error;
++    const auto track = session.createTemporaryTrack(id, &error);
++    ASSERT_TRUE(track) << error.toStdString();
++    EXPECT_EQ(mixxx::TrackUsePolicy::usbFolderPolicy(), track->getUsePolicy());
++    EXPECT_FALSE(track->getUsePolicy().canPersist());
++    EXPECT_FALSE(track->getUsePolicy().canExportMetadata());
++    EXPECT_TRUE(track->getUsePolicy().canAnalyze());
++    EXPECT_EQ(mixxx::SourceType::StandardLibrary, track->getSourceBinding().sourceType());
++    EXPECT_TRUE(track->isSourceAvailableForPlayback());
++    EXPECT_EQ(QStringLiteral("Song"), track->getTitle());
++    EXPECT_EQ(QStringLiteral("Someone"), track->getArtist());
++    EXPECT_EQ(4, track->getRating());
++    EXPECT_EQ(QStringLiteral("traktor"), track->property("externalLibraryProvider").toString());
++    EXPECT_FALSE(track->property("rekordboxTimingSemantics").toBool());
++
++    // Every write path refuses this source.
++    EXPECT_EQ(QStringLiteral("This library is read-only in NauticMixxx."),
++            session.writeRating(id, 5));
++    EXPECT_EQ(QStringLiteral("This library is read-only in NauticMixxx."),
++            session.writeList(QStringLiteral("x"), {id}, false));
++    EXPECT_TRUE(isReadOnlySourcePath(audio));
++    EXPECT_TRUE(isReadOnlyPath(audio));
++    EXPECT_TRUE(session.refresh());
++    EXPECT_EQ(audioBefore, digest(audio));
++    EXPECT_EQ(nmlBefore, digest(nml));
++
++    session.invalidate();
++    EXPECT_FALSE(session.createTemporaryTrack(id));
++}
++
++TEST(Rx3ExternalTrackTest, MissingAudioIsNotLoadable) {
++    QTemporaryDir directory;
++    ASSERT_TRUE(directory.isValid());
++    const auto xml = write(directory.filePath("rekordbox.xml"), R"(<?xml version="1.0"?>
++<DJ_PLAYLISTS Version="1.0.0"><COLLECTION Entries="1">
++<TRACK TrackID="1" Name="Ghost" Location="file://localhost/nonexistent/ghost.mp3"/>
++</COLLECTION><PLAYLISTS><NODE Type="0" Name="ROOT" Count="0"></NODE></PLAYLISTS></DJ_PLAYLISTS>)");
++    ExternalSessionSource source;
++    source.files = {xml};
++    source.kind = QStringLiteral("library");
++    RekordboxUsbSession session(xml, source);
++    ASSERT_TRUE(session.load()) << session.error().toStdString();
++    const auto id = session.catalog()->tracks().keys().first();
++    QString error;
++    EXPECT_FALSE(session.createTemporaryTrack(id, &error));
++    EXPECT_FALSE(error.isEmpty());
++}
 diff --git a/src/test/rx3folderusb_test.cpp b/src/test/rx3folderusb_test.cpp
 new file mode 100644
-index 0000000..0883088
+index 0000000..ab70acb
 --- /dev/null
 +++ b/src/test/rx3folderusb_test.cpp
 @@ -0,0 +1,91 @@
@@ -510,7 +2751,7 @@ index 0000000..0883088
 +    EXPECT_FALSE(snapshot.mountIdentity.isEmpty());
 +
 +    const QString track = QDir(root).filePath("Music/track.mp3");
-+    EXPECT_TRUE(isFolderOnlyPath(track));
++    EXPECT_TRUE(isReadOnlySourcePath(track));
 +    EXPECT_TRUE(isReadOnlyPath(track));
 +    EXPECT_TRUE(isReadOnlyPath(QDir(root).filePath("Music/new-file.wav")));
 +
@@ -533,12 +2774,12 @@ index 0000000..0883088
 +    const QString root = QFileInfo(usb.path()).canonicalFilePath();
 +    const auto folder = inspectFolderDevice(root);
 +    ASSERT_EQ(DeviceState::Readable, folder.state);
-+    ASSERT_TRUE(isFolderOnlyPath(root));
++    ASSERT_TRUE(isReadOnlySourcePath(root));
 +
 +    touch(QDir(root).filePath("PIONEER/rekordbox/export.pdb"));
 +    const auto exported = inspectDevice(root);
 +    EXPECT_FALSE(exported.folderOnly);
-+    EXPECT_FALSE(isFolderOnlyPath(root));
++    EXPECT_FALSE(isReadOnlySourcePath(root));
 +    // Still protected from Mixxx writes as a rekordbox root.
 +    EXPECT_TRUE(isReadOnlyPath(QDir(root).filePath("track.mp3")));
 +    // Re-discovery treats the two kinds as different devices.
@@ -562,19 +2803,19 @@ index 0000000..0883088
 +    EXPECT_FALSE(folderContainsSupportedAudio(QDir(root).filePath("missing"), isMp3));
 +}
 diff --git a/src/widget/rx3mysettingswriter.h b/src/widget/rx3mysettingswriter.h
-index 9ddd040..960e571 100644
+index 9ddd040..65cc880 100644
 --- a/src/widget/rx3mysettingswriter.h
 +++ b/src/widget/rx3mysettingswriter.h
 @@ -11,6 +11,7 @@
  namespace rx3 {
  // Blocking USB I/O belongs on a worker. Controls are snapshotted by the caller.
  inline QString saveUsbMySettings(const QString& root,const QMap<QString,double>& values) {
-+    if(mixxx::rekordbox::isFolderOnlyPath(root)) return QString("This USB is read-only in NauticMixxx.");
++    if(mixxx::rekordbox::isReadOnlySourcePath(root)) return QString("This USB is read-only in NauticMixxx.");
      rx3::UsbStorageInfo storage(root);storage.refresh();
      if(root.isEmpty() || !storage.isReady() || storage.isReadOnly()) return QString("Select a writable USB in SOURCE first.");
      const auto canonicalRoot=QFileInfo(root).canonicalFilePath();
 diff --git a/src/widget/rx3sourceappearance.h b/src/widget/rx3sourceappearance.h
-index ee16bad..019f367 100644
+index ee16bad..ebd7a57 100644
 --- a/src/widget/rx3sourceappearance.h
 +++ b/src/widget/rx3sourceappearance.h
 @@ -8,6 +8,8 @@
@@ -590,15 +2831,30 @@ index ee16bad..019f367 100644
              value.toDouble()==index && index>=0 && index<sourceColorNames().size()?index:0;
  }
  inline QString saveSourceColor(const QString& root,int color) {
-+    if(mixxx::rekordbox::isFolderOnlyPath(root)) return "This USB is read-only in NauticMixxx.";
++    if(mixxx::rekordbox::isReadOnlySourcePath(root)) return "This USB is read-only in NauticMixxx.";
      if(root.isEmpty() || !QDir(root).exists() || !QDir(QDir(root).filePath("PIONEER")).exists())
          return "Select a connected rekordbox USB in SOURCE first.";
      if(color<0 || color>=sourceColorNames().size()) return "Unsupported background color.";
 diff --git a/src/widget/wrx3browser.h b/src/widget/wrx3browser.h
-index fe5a9da..ef89f46 100644
+index fe5a9da..f624e45 100644
 --- a/src/widget/wrx3browser.h
 +++ b/src/widget/wrx3browser.h
-@@ -550,6 +550,11 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -365,7 +365,13 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+         });
+     }
+     ~WRx3Browser() override = default;
+-    QString infoUsbName(const QString& root) const {return QString("USB%1").arg(m_usbSlots.value(root));}
++    QString infoUsbName(const QString& root) const {return sourceDisplayName(root);}
++    // "USB1".. for drives; the library name (TRAKTOR, REKORDBOX XML) for
++    // library files on this computer, which take no USB slot.
++    QString sourceDisplayName(const QString& root) const {
++        if(m_libraryLabels.contains(root)) return m_libraryLabels.value(root);
++        return QString("USB%1").arg(m_usbSlots.value(root));
++    }
+     Rx3TrackInfoPanel* detailedInfo() const {return m_detailedInfo;}
+     bool canShowInfo() const {return m_pages->currentIndex()==0 && m_level==BrowserLevel::Tracks;}
+     void showTrackInfo(bool show) {
+@@ -550,6 +556,11 @@ class WRx3Browser : public QWidget, public WBaseWidget {
      }
      void openSearch() {
          if(!deviceReady(m_selectedDevice)) {showSources();return;}
@@ -610,7 +2866,7 @@ index fe5a9da..ef89f46 100644
          m_selectedCategory="SEARCH";m_search->clear();
          m_searchHasAllTracks=false;
          m_backend->rekordboxFeature()->showTrackIds(m_currentRoot,{},"search");showTrackList(BrowserLevel::Categories);
-@@ -599,6 +604,12 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -599,6 +610,12 @@ class WRx3Browser : public QWidget, public WBaseWidget {
                  ? m_categoryIds.at(m_categories->currentRow()) : quint16(0);
          m_categories->clear();m_categoryIds.clear();
          if(!m_selectedDevice.isValid()) {showSources();return;}
@@ -623,7 +2879,7 @@ index fe5a9da..ef89f46 100644
          const auto currentCatalog=catalog();
          if(deviceStatus(m_selectedDevice)!="ready" || !currentCatalog) return;
          const auto menu=currentCatalog->browseMenu();
-@@ -816,7 +827,8 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -816,7 +833,8 @@ class WRx3Browser : public QWidget, public WBaseWidget {
      void selectCategory(int row) {
          if(m_detailedInfo->isVisible()) ControlObject::set(ConfigKey("[RX3Info]","visible"),0);
          if(row<0 || row>=m_categoryIds.size() || !m_selectedDevice.isValid()) return;
@@ -633,7 +2889,7 @@ index fe5a9da..ef89f46 100644
              showSources();
              return;
          }
-@@ -1037,8 +1049,15 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -1037,8 +1055,15 @@ class WRx3Browser : public QWidget, public WBaseWidget {
      QString deviceStatus(const QPersistentModelIndex& device) const {
          return device.data(SidebarModel::DataRole).toList().value(2).toString();
      }
@@ -649,25 +2905,148 @@ index fe5a9da..ef89f46 100644
          auto* feature=m_backend?m_backend->rekordboxFeature():nullptr;
          const auto currentCatalog=feature ? feature->catalogForRoot(deviceRoot(device)) : nullptr;
          return currentCatalog && !currentCatalog->browseMenu().categories.isEmpty();
-@@ -1230,12 +1249,14 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+@@ -1137,7 +1162,7 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+         m_sources->viewport()->update();
+         const auto root=m_pages->currentIndex()==1?deviceRoot(sourceDeviceForNavigation()):m_currentRoot;
+         const auto color=rx3::sourceColor(rx3::readSourceColor(root)).name();
+-        m_sourceLabel->setText(QString("USB%1").arg(m_usbSlots.value(root)));
++        m_sourceLabel->setText(sourceDisplayName(root));
+         m_sourceLabel->setStyleSheet("background:"+color+";color:white;padding:8px;font-size:16px;");
+         m_sourceLabel->setVisible(m_pages->currentIndex()!=1 && m_pages->currentWidget()!=m_tools &&
+                 m_pages->currentWidget()!=m_utility && !root.isEmpty());
+@@ -1195,8 +1220,21 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+         for(auto it=m_usbSlots.begin();it!=m_usbSlots.end();) {
+             if(!present.contains(it.key())) it=m_usbSlots.erase(it);else ++it;
+         }
++        m_libraryLabels.clear();
++        for(const auto& device:m_devices)
++            if(device.data(SidebarModel::DataRole).toList().value(5).toString()=="library")
++                m_libraryLabels.insert(deviceRoot(device),device.data(Qt::DisplayRole).toString().toUpper());
+         for(int row=0;row<int(m_devices.size());++row) {
+             const QString root=deviceRoot(m_devices[row]);
++            if(m_libraryLabels.contains(root)) {
++                m_sources->topLevelItem(row)->setText(0,QString("▣   %1   %2").arg(sourceDisplayName(root))
++                        .arg(deviceReady(m_devices[row]) ? "›" : deviceStatus(m_devices[row])=="error" ? "ERROR" : "READING…"));
++                m_sources->topLevelItem(row)->setData(0,Qt::UserRole+1,0);
++                m_sources->topLevelItem(row)->setData(0,Qt::UserRole+2,sourceDisplayName(root));
++                m_sources->topLevelItem(row)->setData(0,Qt::UserRole+3,deviceReady(m_devices[row])?"›":
++                        deviceStatus(m_devices[row])=="error"?"ERROR":"READING…");
++                continue;
++            }
+             if(!m_usbSlots.contains(root)) {
+                 int slot=1;while(m_usbSlots.values().contains(slot)) ++slot;
+                 m_usbSlots.insert(root,slot);
+@@ -1212,7 +1250,17 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+             auto* empty=new QTreeWidgetItem(m_sources,{"NO DEVICE"});
+             empty->setFlags(Qt::NoItemFlags);
+         }
+-        if(m_devices.empty()) selected=0;
++        auto* feature=m_backend?m_backend->rekordboxFeature():nullptr;
++        if(feature && feature->externalLibrariesEnabled()) {
++            // Traktor collection / rekordbox XML on this computer (read-only).
++            auto* add=new QTreeWidgetItem(m_sources,{"＋   ADD LIBRARY   TRAKTOR · XML"});
++            add->setData(0,Qt::UserRole,QString(kAddLibraryRow));
++            add->setData(0,Qt::UserRole+1,0);
++            add->setData(0,Qt::UserRole+2,QString("ADD LIBRARY"));
++            add->setData(0,Qt::UserRole+3,QString("TRAKTOR · XML  ＋"));
++            if(previousRoot==QString(kAddLibraryRow)) selected=m_sources->topLevelItemCount()-1;
++        }
++        if(m_devices.empty() && previousRoot!=QString(kAddLibraryRow)) selected=0;
+         m_sources->setCurrentItem(m_sources->topLevelItem(selected));
+         m_refreshingSources=false;
+         updateSourceInfo(selected);
+@@ -1223,36 +1271,61 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+         if(row>=0 && row<int(m_devices.size()) && deviceReady(m_devices[row])) {
+             const auto root=deviceRoot(m_devices[row]);
+             qApp->setProperty("rx3SettingsUsbRoot",root);
+-            qApp->setProperty("rx3SettingsUsbName",QString("USB%1").arg(m_usbSlots.value(root)));
++            qApp->setProperty("rx3SettingsUsbName",sourceDisplayName(root));
+             qApp->setProperty("rx3SettingsUsbDeviceName",m_devices[row].data(Qt::DisplayRole).toString());
+         } else qApp->setProperty("rx3SettingsUsbRoot",QString());
+         if(m_refreshingSources) return;
          QString songs,playlists,total,available,date;
          const bool hasDevice=row>=0 && row<int(m_devices.size());
          const bool ready=hasDevice && deviceReady(m_devices[row]);
 -        m_sourceSettings->setEnabled(ready);
 +        const bool folderOnly=hasDevice && isFolderOnlyDevice(m_devices[row]);
-+        m_sourceSettings->setEnabled(ready && !folderOnly);
++        auto* sourceFeature=m_backend?m_backend->rekordboxFeature():nullptr;
++        const bool readOnlySource=hasDevice && sourceFeature && sourceFeature->isReadOnlySource(deviceRoot(m_devices[row]));
++        const bool library=hasDevice && m_libraryLabels.contains(deviceRoot(m_devices[row]));
++        m_sourceSettings->setEnabled(ready && !folderOnly && !readOnlySource);
          for(int i=1;i<=4;++i) m_headerButtons[i]->setEnabled(ready ||
                  (m_pages->currentIndex()!=1 && deviceReady(m_selectedDevice)));
++        if(!hasDevice && m_sources->currentItem() &&
++                m_sources->currentItem()->data(0,Qt::UserRole).toString()==QString(kAddLibraryRow)) {
++            m_info->setText("<table width='100%' cellspacing='0'><tr><td style='background:#303030;padding:12px'>ADD LIBRARY</td></tr>"
++                    "<tr><td style='padding:12px'>Add a Traktor collection (collection.nml or an exported .nml playlist) "
++                    "or a rekordbox XML from this computer.</td></tr>"
++                    "<tr><td style='padding:12px'>Read only: NauticMixxx never changes the library or its music.</td></tr>"
++                    "<tr><td style='padding:12px'>Choose an added file again to remove it from SOURCE.</td></tr></table>");
++            return;
++        }
          if(hasDevice) {
              const auto data=m_devices[row].data(SidebarModel::DataRole).toList();
 -            if(ready) {songs=data.value(3).toString();playlists=data.value(4).toString();}
+-            QStorageInfo volume(data.value(0).toString());
+-            if(volume.isValid() && volume.isReady()) {
+-                total=QString::number(volume.bytesTotal()/1e9,'f',1);
+-                available=QString::number(volume.bytesAvailable()/1e9,'f',1);
 +            if(ready && folderOnly) {songs=QStringLiteral("—");playlists=QStringLiteral("— (FOLDER · READ ONLY)");}
-+            else if(ready) {songs=data.value(3).toString();playlists=data.value(4).toString();}
-             QStorageInfo volume(data.value(0).toString());
-             if(volume.isValid() && volume.isReady()) {
-                 total=QString::number(volume.bytesTotal()/1e9,'f',1);
++            else if(ready) {songs=data.value(3).toString();playlists=data.value(4).toString()+(readOnlySource?QStringLiteral(" (READ ONLY)"):QString());}
++            if(library) {
++                total=available=QStringLiteral("—");
++                date=QFileInfo(data.value(0).toString()).lastModified().date().toString(Qt::ISODate);
++            } else {
++                QStorageInfo volume(data.value(0).toString());
++                if(volume.isValid() && volume.isReady()) {
++                    total=QString::number(volume.bytesTotal()/1e9,'f',1);
++                    available=QString::number(volume.bytesAvailable()/1e9,'f',1);
++                }
++                const QFileInfo database(QDir(data.value(0).toString()).filePath("PIONEER/rekordbox/export.pdb"));
++                if(database.exists()) date=database.lastModified().date().toString(Qt::ISODate);
+             }
+-            const QFileInfo database(QDir(data.value(0).toString()).filePath("PIONEER/rekordbox/export.pdb"));
+-            if(database.exists()) date=database.lastModified().date().toString(Qt::ISODate);
+         }
+         auto line=[](const QString& label,const QString& value) -> QString {
+             return "<tr><td style='padding:12px'>"+label+"</td><td align='right' style='padding:12px'>"+value.toHtmlEscaped()+"</td></tr>";
+         };
+         m_info->setText("<table width='100%' cellspacing='0'><tr><td colspan='2' style='background:#303030;padding:12px'>INFO</td></tr>"+
+                 line("Songs",songs)+line("Playlists",playlists)+line("Date",date)+
+-                line("Total",total+" GB")+line("Available",available+" GB")+
++                line("Total",total.isEmpty()||total=="—"?total:total+" GB")+
++                line("Available",available.isEmpty()||available=="—"?available:available+" GB")+
+                 line("Background Color",hasDevice ? rx3::sourceColorNames().value(rx3::readSourceColor(deviceRoot(m_devices[row]))) : "")+"</table>");
+     }
+     void chooseSource() {
++        if(m_sources->currentItem() &&
++                m_sources->currentItem()->data(0,Qt::UserRole).toString()==QString(kAddLibraryRow)) {
++            if(auto* feature=m_backend?m_backend->rekordboxFeature():nullptr) feature->addExternalLibrary();
++            return;
++        }
+         const int row=m_sources->indexOfTopLevelItem(m_sources->currentItem());
+         if(row<0 || row>=int(m_devices.size())) return;
+         const QModelIndex device=m_devices[row];
+@@ -1260,7 +1333,7 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+         m_selectedDevice=device;
+         m_currentRoot=deviceRoot(m_selectedDevice);
+         qApp->setProperty("rx3SettingsUsbRoot",m_currentRoot);
+-        qApp->setProperty("rx3SettingsUsbName",QString("USB%1").arg(m_usbSlots.value(m_currentRoot)));
++        qApp->setProperty("rx3SettingsUsbName",sourceDisplayName(m_currentRoot));
+         qApp->setProperty("rx3SettingsUsbDeviceName",m_selectedDevice.data(Qt::DisplayRole).toString());
+         m_pages->setCurrentIndex(0);
+         m_source->setText("SOURCE");m_facets->hide();m_sidebar->hide();
+@@ -1477,6 +1550,8 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+     QString m_selectedCategory;
+     bool m_refreshingSources=false;
+     QString m_currentRoot;
++    static constexpr const char* kAddLibraryRow = "nauticmixxx:add-library";
++    QHash<QString,QString> m_libraryLabels;
+ };
+ 
+ #include "widget/wrx3browsertools.h"
 diff --git a/src/widget/wrx3browsertools.h b/src/widget/wrx3browsertools.h
-index 4e5aacc..41f8bc2 100644
+index 4e5aacc..abcfb58 100644
 --- a/src/widget/wrx3browsertools.h
 +++ b/src/widget/wrx3browsertools.h
 @@ -188,7 +188,7 @@ inline void WRx3Browser::showAudioTools() {
@@ -675,7 +3054,7 @@ index 4e5aacc..41f8bc2 100644
      m_tools->showMenu("USB RECORDING",{
          toolAction("START RECORDING TO SELECTED USB",[this]{
 -            if(!m_config || !catalog()) {m_tools->message("Select a connected USB in SOURCE first.");return;}
-+            if(!m_config || !catalog() || mixxx::rekordbox::isFolderOnlyPath(m_currentRoot)) {m_tools->message("Select a connected rekordbox USB in SOURCE first.");return;}
++            if(!m_config || !catalog() || mixxx::rekordbox::isReadOnlySourcePath(m_currentRoot)) {m_tools->message("Select a connected rekordbox USB in SOURCE first.");return;}
              if(ControlObject::get(ConfigKey("[Recording]","status"))>0) {m_tools->message("A recording is already active.");return;}
              rx3::UsbStorageInfo storage(m_currentRoot);storage.refresh();
              if(!storage.isReady() || storage.isReadOnly() || storage.bytesAvailable()<=1024LL*1024*1024) {m_tools->message("USB unavailable, read-only or less than 1 GiB free.");return;}
