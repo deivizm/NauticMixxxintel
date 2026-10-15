@@ -9,6 +9,10 @@ on:
         description: "Incluir soporte Traktor Kontrol S8 (HID, LEDs y pantallas; experimental en macOS)"
         type: boolean
         default: true
+      folder_usb:
+        description: "Leer USB sin rekordbox (navegación FOLDER, solo lectura)"
+        type: boolean
+        default: true
       run_tests:
         description: "Ejecutar las pruebas RX3 tras compilar"
         type: boolean
@@ -34,6 +38,7 @@ jobs:
       RX3_BUILD_JOBS: 4
       RX3_TESTS_NONFATAL: 1
       RX3_WITH_S8: ${{ inputs.with_s8 && '1' || '0' }}
+      RX3_FOLDER_USB: ${{ inputs.folder_usb && '1' || '0' }}
     steps:
       - uses: actions/checkout@v4
 

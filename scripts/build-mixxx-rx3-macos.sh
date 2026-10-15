@@ -36,12 +36,16 @@ fi
 # RX3_WITH_S8=1 añade el soporte Kontrol S8 (HID + pantallas) de patches-s8/.
 with_s8=${RX3_WITH_S8:-0}
 s8_suffix=; [ "$with_s8" = 1 ] && s8_suffix=-s8
+# RX3_FOLDER_USB=1 (por defecto) muestra en SOURCE los USB sin exportación de
+# rekordbox, navegables por FOLDER y siempre en solo lectura (patches-usb/).
+folder_usb=${RX3_FOLDER_USB:-1}
+[ "$folder_usb" = 1 ] && s8_suffix="$s8_suffix-usb"
 work=${RX3_BUILD_ROOT:-"$project/build/test-candidate/$(cat "$project/VERSION")-native-$arch$s8_suffix"}
 mkdir -p "$work"
 # Ruta canónica (sin "..", enlaces ni /tmp→/private/tmp): fixup_bundle de CMake
 # compara rutas como texto y rechaza librerías si el prefijo no coincide.
 work=$(CDPATH= cd -- "$work" && pwd -P)
-printf 'NauticMixxx %s · %s · %s procesos · Kontrol S8: %s\n' "$(cat "$project/VERSION")" "$arch" "$RX3_BUILD_JOBS" "$with_s8"
+printf 'NauticMixxx %s · %s · %s procesos · Kontrol S8: %s · USB sin rekordbox: %s\n' "$(cat "$project/VERSION")" "$arch" "$RX3_BUILD_JOBS" "$with_s8" "$folder_usb"
 fetch() {
   if [ ! -f "$2" ]; then curl --fail --location --retry 3 "$1" -o "$2"; fi
   actual=$(shasum -a 256 "$2" | awk '{print $1}')
@@ -57,6 +61,9 @@ if [ ! -d "$work/buildenv/$deps_name" ]; then
 fi
 # Lista de parches en los argumentos posicionales (seguro con espacios en la ruta).
 set -- "$project"/patches/00[0-9][0-9]-*.patch
+if [ "$folder_usb" = 1 ]; then
+  set -- "$@" "$project"/patches-usb/00[0-9][0-9]-*.patch
+fi
 if [ "$with_s8" = 1 ]; then
   set -- "$@" "$project"/patches-s8/00[0-9][0-9]-*.patch
   # Los mappings incluidos deben coincidir con el manifiesto del autor.
@@ -113,6 +120,7 @@ else
 # Las pruebas de interfaz dependen de temporizadores; en máquinas lentas o
 # compartidas pueden fallar por tiempo. Se reintentan hasta RX3_TEST_ATTEMPTS veces.
 s8_tests=; [ "$with_s8" = 1 ] && s8_tests=':S8Bridge289Test.*:LoopingControlTest.BeatjumpBackwardAtStartNeverSeeksBeforeTrack'
+# Rx3FolderUsbTest.* ya entra en el filtro Rx3*.
 attempt=1
 until (cd "$work/build" && QT_QPA_PLATFORM=offscreen NAUTIC_SKIN_DIR="$project/skins/XDJ_RX3_Mixxx" NAUTIC_RX3_STYLESHEET="$project/skins/XDJ_RX3_Mixxx/style.qss" ./mixxx-test \
   --gtest_filter="IntegratedUpdaterTest.*:UpdatePayloadTest.*:StartupUpdateCheckerTest.*:StartupUpdateDialogTest.*:StreamCompletionTest.*:LibraryTableViewStateTest.*:Rx3*:RekordboxDecoderTimingTest.*:RekordboxUsbSessionAudioTest.*:RekordboxWaveformImporterTest.*$s8_tests" \

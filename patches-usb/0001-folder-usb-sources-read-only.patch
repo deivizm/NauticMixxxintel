@@ -1,0 +1,681 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index d0b0cdd..1e2e7cf 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -2142,6 +2142,7 @@ if(BUILD_TESTING)
+     src/test/rekordboxruntimecatalog_test.cpp
+     src/test/rekordboxdatabase_test.cpp
+     src/test/rekordboxdevice_test.cpp
++    src/test/rx3folderusb_test.cpp
+     src/test/rx3display_test.cpp
+     src/test/rx3beatfx_test.cpp
+     src/test/soundreconfiguration_test.cpp
+diff --git a/src/library/library.cpp b/src/library/library.cpp
+index fe961a6..70a0fc6 100644
+--- a/src/library/library.cpp
++++ b/src/library/library.cpp
+@@ -262,7 +262,7 @@ Library::~Library() = default;
+ 
+ bool Library::showUsbFolder(const QString& root, const QString& path) {
+     auto* feature=rekordboxFeature();
+-    return feature && feature->catalogForRoot(root) &&
++    return feature && (feature->catalogForRoot(root) || feature->isFolderOnlyRoot(root)) &&
+             m_pBrowseFeature->showUsbFolder(root,path);
+ }
+ 
+diff --git a/src/library/library_prefs.cpp b/src/library/library_prefs.cpp
+index 5da82de..8b2a6da 100644
+--- a/src/library/library_prefs.cpp
++++ b/src/library/library_prefs.cpp
+@@ -23,6 +23,11 @@ const ConfigKey mixxx::library::prefs::kUsbOnlyModeConfigKey =
+                 mixxx::library::prefs::kConfigGroup,
+                 QStringLiteral("UsbOnlyMode")};
+ 
++const ConfigKey mixxx::library::prefs::kFolderUsbSourcesConfigKey =
++        ConfigKey{
++                mixxx::library::prefs::kConfigGroup,
++                QStringLiteral("FolderUsbSources")};
++
+ const ConfigKey mixxx::library::prefs::kKeyNotationConfigKey =
+         ConfigKey{
+                 mixxx::library::prefs::kConfigGroup,
+diff --git a/src/library/library_prefs.h b/src/library/library_prefs.h
+index fa6cafe..9ea7d29 100644
+--- a/src/library/library_prefs.h
++++ b/src/library/library_prefs.h
+@@ -16,6 +16,10 @@ extern const ConfigKey kRescanOnStartupConfigKey;
+ 
+ extern const ConfigKey kUsbOnlyModeConfigKey;
+ 
++// Show USB drives without a rekordbox export in SOURCE (FOLDER browsing only,
++// always read-only). Enabled unless explicitly set to 0.
++extern const ConfigKey kFolderUsbSourcesConfigKey;
++
+ extern const ConfigKey kKeyNotationConfigKey;
+ 
+ extern const ConfigKey kTrackDoubleClickActionConfigKey;
+diff --git a/src/library/rekordbox/rekordboxdevice.cpp b/src/library/rekordbox/rekordboxdevice.cpp
+index 8e45c99..a170b8b 100644
+--- a/src/library/rekordbox/rekordboxdevice.cpp
++++ b/src/library/rekordbox/rekordboxdevice.cpp
+@@ -4,16 +4,21 @@
+ #include <QCryptographicHash>
+ #include <QDateTime>
+ #include <QDir>
++#include <QDirIterator>
+ #include <QFile>
+ #include <QFileInfo>
+ #include <QMutex>
+ #include <QMutexLocker>
++#include <QPair>
+ #include <QSet>
+ 
++#include <utility>
++
+ namespace mixxx::rekordbox {
+ namespace {
+ QMutex rootsMutex;
+ QSet<QString> protectedRoots;
++QSet<QString> folderOnlyRoots;
+ 
+ QString absolutePath(const QString& path) {
+     return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
+@@ -156,6 +161,105 @@ bool isReadOnlyPath(const QString& path) {
+     return false;
+ }
+ 
++void setFolderOnlyRoot(const QString& root, bool folderOnly) {
++    if (root.isEmpty()) {
++        return;
++    }
++    const auto absolute = absolutePath(root);
++    const auto canonical = QFileInfo(root).canonicalFilePath();
++    {
++        QMutexLocker lock(&rootsMutex);
++        for (const auto& path : {absolute, canonical}) {
++            if (path.isEmpty()) {
++                continue;
++            }
++            if (folderOnly) {
++                folderOnlyRoots.insert(path);
++            } else {
++                folderOnlyRoots.remove(path);
++            }
++        }
++    }
++    if (folderOnly) {
++        protectRoot(root);
++    }
++}
++
++bool isFolderOnlyPath(const QString& path) {
++    if (path.isEmpty()) {
++        return false;
++    }
++    const auto absolute = absolutePath(path);
++    const auto canonical = resolvedPath(path);
++    QMutexLocker lock(&rootsMutex);
++    for (const auto& root : std::as_const(folderOnlyRoots)) {
++        if (inside(root, absolute) || (!canonical.isEmpty() && inside(root, canonical))) {
++            return true;
++        }
++    }
++    return false;
++}
++
++DeviceSnapshot inspectFolderDevice(const QString& root) {
++    DeviceSnapshot result;
++    result.folderOnly = true;
++    result.root = QFileInfo(root).canonicalFilePath();
++    if (result.root.isEmpty() || !QFileInfo(result.root).isDir()) {
++        result.error = QStringLiteral("USB folder is missing");
++        return result;
++    }
++    const rx3::UsbStorageInfo storage(result.root);
++    if (!storage.isReady() || storage.device().isEmpty()) {
++        result.state = DeviceState::Unreadable;
++        result.error = QStringLiteral("USB mount is unavailable");
++        return result;
++    }
++    result.mountIdentity = storage.device();
++    setFolderOnlyRoot(result.root, true);
++    result.state = DeviceState::Readable;
++    return result;
++}
++
++bool folderContainsSupportedAudio(const QString& root,
++        const std::function<bool(const QString&)>& isSupportedFileName,
++        int maxDepth,
++        int maxEntries) {
++    const QString canonicalRoot = QFileInfo(root).canonicalFilePath();
++    if (canonicalRoot.isEmpty() || !isSupportedFileName) {
++        return false;
++    }
++    QList<QPair<QString, int>> pending{{canonicalRoot, 0}};
++    int visited = 0;
++    while (!pending.isEmpty()) {
++        const auto [directory, depth] = pending.takeFirst();
++        QDirIterator entries(directory,
++                QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Readable);
++        while (entries.hasNext()) {
++            entries.next();
++            if (++visited > maxEntries) {
++                return false;
++            }
++            const QFileInfo entry = entries.fileInfo();
++            const QString name = entry.fileName();
++            // System folders and links never decide that a volume holds music.
++            if (entry.isSymLink() || name.startsWith(QChar('.')) ||
++                    name.compare(QStringLiteral("System Volume Information"),
++                            Qt::CaseInsensitive) == 0 ||
++                    name.compare(QStringLiteral("$RECYCLE.BIN"), Qt::CaseInsensitive) == 0) {
++                continue;
++            }
++            if (entry.isDir()) {
++                if (depth + 1 <= maxDepth) {
++                    pending.append({entry.absoluteFilePath(), depth + 1});
++                }
++            } else if (isSupportedFileName(name)) {
++                return true;
++            }
++        }
++    }
++    return false;
++}
++
+ DeviceSnapshot inspectDevice(const QString& root) {
+     DeviceSnapshot result;
+     result.root = QFileInfo(root).canonicalFilePath();
+@@ -164,6 +268,8 @@ DeviceSnapshot inspectDevice(const QString& root) {
+         result.error = QStringLiteral("Rekordbox database is missing");
+         return result;
+     }
++    // This volume now carries an export: it is no longer a folder-only USB.
++    setFolderOnlyRoot(result.root, false);
+     const rx3::UsbStorageInfo storage(root);
+     if(!storage.isReady() || storage.device().isEmpty()) {
+         result.state=DeviceState::Unreadable;result.error=QStringLiteral("USB mount is unavailable");return result;
+@@ -213,6 +319,7 @@ DeviceSnapshot inspectDevice(const QString& root) {
+ 
+ bool DeviceSnapshot::matches(const DeviceSnapshot& other) const {
+     return state == DeviceState::Readable && other.state == DeviceState::Readable &&
++            folderOnly == other.folderOnly &&
+             root == other.root && mountIdentity == other.mountIdentity && fingerprint == other.fingerprint;
+ }
+ } // namespace mixxx::rekordbox
+diff --git a/src/library/rekordbox/rekordboxdevice.h b/src/library/rekordbox/rekordboxdevice.h
+index 662afb2..ea8e678 100644
+--- a/src/library/rekordbox/rekordboxdevice.h
++++ b/src/library/rekordbox/rekordboxdevice.h
+@@ -4,6 +4,8 @@
+ #include <QList>
+ #include <QString>
+ 
++#include <functional>
++
+ namespace mixxx::rekordbox {
+ 
+ enum class DeviceState { Missing, Unreadable, Readable, TooLarge };
+@@ -17,6 +19,9 @@ struct DeviceSnapshot {
+     DeviceState state{DeviceState::Missing};
+     QString error;
+     QByteArray mountIdentity; // Mounted filesystem/device, independently of PDB contents.
++    // A USB volume without a rekordbox export. It is browsed by FOLDER only and
++    // NauticMixxx never writes to it.
++    bool folderOnly{false};
+ 
+     bool matches(const DeviceSnapshot& other) const;
+ };
+@@ -52,4 +57,17 @@ QString resolvePath(const QString& root, const QString& exportedPath,
+ void protectRoot(const QString& root);
+ bool isReadOnlyPath(const QString& path);
+ 
++// Folder-only (non-rekordbox) USB volumes. Marking a root also protects it, so
++// every Mixxx write boundary that checks isReadOnlyPath() refuses it. Explicit
++// rekordbox writers (MY SETTINGS, colors, lists, recordings) additionally
++// refuse any path for which isFolderOnlyPath() is true.
++void setFolderOnlyRoot(const QString& root, bool folderOnly);
++bool isFolderOnlyPath(const QString& path);
++DeviceSnapshot inspectFolderDevice(const QString& root);
++// Bounded, read-only search for at least one supported audio file.
++bool folderContainsSupportedAudio(const QString& root,
++        const std::function<bool(const QString&)>& isSupportedFileName,
++        int maxDepth = 4,
++        int maxEntries = 4000);
++
+ } // namespace mixxx::rekordbox
+diff --git a/src/library/rekordbox/rekordboxfeature.cpp b/src/library/rekordbox/rekordboxfeature.cpp
+index 05046e4..aaebebf 100644
+--- a/src/library/rekordbox/rekordboxfeature.cpp
++++ b/src/library/rekordbox/rekordboxfeature.cpp
+@@ -18,18 +18,22 @@
+ 
+ #include "library/dao/settingsdao.h"
+ #include "library/library.h"
++#include "library/library_prefs.h"
+ #include "library/trackcollection.h"
+ #include "library/trackcollectionmanager.h"
+ #include "library/treeitem.h"
+ #include "mixer/playerinfo.h"
++#include "sources/soundsourceproxy.h"
+ #include "track/track.h"
+ #include "moc_rekordboxfeature.cpp"
++#include "util/rx3usbstorage.h"
+ #include "util/sandbox.h"
+ #include "widget/wlibrary.h"
+ 
+ namespace {
+ 
+ const QString kDeviceItem = QStringLiteral("rekordbox-device");
++const QString kFolderDeviceItem = QStringLiteral("usb-folder-device");
+ const QString kAllTracksItem = QStringLiteral("rekordbox-runtime-all");
+ const QString kPlaylistItem = QStringLiteral("rekordbox-runtime-playlist");
+ const QString kAuthorizedUsbRootsSettingsKey =
+@@ -55,9 +59,44 @@ QString rekordboxDeviceRootFromSelection(const QString& selectedPath) {
+     return {};
+ }
+ 
++bool isSameVolumeRoot(const QString& a, const QString& b) {
++#if defined(__WINDOWS__)
++    return QDir::cleanPath(a).compare(QDir::cleanPath(b), Qt::CaseInsensitive) == 0;
++#else
++    return QDir::cleanPath(a) == QDir::cleanPath(b);
++#endif
++}
++
++// A folder-only source must be the root of a removable-looking volume, never
++// the system or home volume. Explicitly authorized macOS roots skip the audio
++// probe because the user chose them in the native dialog.
++bool isFolderUsbCandidate(const QString& path, bool authorized) {
++    const QString canonical = QFileInfo(path).canonicalFilePath();
++    if (canonical.isEmpty() || !QFileInfo(canonical).isDir()) {
++        return false;
++    }
++    // statfs-based on macOS: QStorageInfo can misreport external mounts there.
++    const rx3::UsbStorageInfo volume(canonical);
++    if (!volume.isReady() || volume.rootPath().isEmpty() ||
++            !isSameVolumeRoot(volume.rootPath(), canonical)) {
++        return false;
++    }
++    for (const auto& systemPath : {QDir::rootPath(), QDir::homePath()}) {
++        const rx3::UsbStorageInfo system(systemPath);
++        if (system.isReady() && isSameVolumeRoot(system.rootPath(), canonical)) {
++            return false;
++        }
++    }
++    return authorized ||
++            mixxx::rekordbox::folderContainsSupportedAudio(canonical,
++                    [](const QString& name) {
++                        return SoundSourceProxy::isFileNameSupported(name);
++                    });
++}
++
+ // Discovery performs bounded, read-only fingerprinting off the GUI thread.
+ QList<mixxx::rekordbox::DiscoveredDevice> findRekordboxDevices(
+-        const QStringList& manuallyAuthorizedDevicePaths) {
++        const QStringList& manuallyAuthorizedDevicePaths, bool includeFolderUsb) {
+     QThread::currentThread()->setPriority(QThread::LowPriority);
+     QFileInfoList devices;
+ #if defined(__WINDOWS__)
+@@ -80,6 +119,24 @@ QList<mixxx::rekordbox::DiscoveredDevice> findRekordboxDevices(
+     QSet<QString> seen;
+     for (const auto& device : std::as_const(devices)) {
+         if (findRekordboxPdbPath(device.absoluteFilePath()).isEmpty()) {
++            if (!includeFolderUsb) {
++                continue;
++            }
++            const bool authorized =
++                    manuallyAuthorizedDevicePaths.contains(device.absoluteFilePath());
++            if (!isFolderUsbCandidate(device.absoluteFilePath(), authorized)) {
++                continue;
++            }
++            auto snapshot = mixxx::rekordbox::inspectFolderDevice(device.absoluteFilePath());
++            if (snapshot.state != mixxx::rekordbox::DeviceState::Readable ||
++                    seen.contains(snapshot.root)) {
++                continue;
++            }
++            seen.insert(snapshot.root);
++            const auto label = device.fileName().isEmpty()
++                    ? device.absoluteFilePath()
++                    : device.fileName();
++            found.append({label, std::move(snapshot)});
+             continue;
+         }
+         auto snapshot = mixxx::rekordbox::inspectDevice(device.absoluteFilePath());
+@@ -313,7 +370,7 @@ void RekordboxFeature::startDiscovery() {
+ 
+     m_discoveryPending = true;
+     m_devicesFuture = QtConcurrent::run(
+-            findRekordboxDevices, manuallyAuthorizedDevicePaths);
++            findRekordboxDevices, manuallyAuthorizedDevicePaths, folderUsbSourcesEnabled());
+     m_devicesFutureWatcher.setFuture(m_devicesFuture);
+ #if defined(Q_OS_MACOS)
+     if (!rootNeedingAccess.isEmpty() && !m_authorizationPending) {
+@@ -329,16 +386,28 @@ void RekordboxFeature::startDiscovery() {
+ 
+ void RekordboxFeature::authorizeVolume(const QString& root) {
+ #if defined(Q_OS_MACOS)
++    const bool folderUsb = folderUsbSourcesEnabled();
+     const auto selectedPath = QFileDialog::getExistingDirectory(nullptr,
+-            tr("Allow access to a Rekordbox USB drive"), root,
++            folderUsb ? tr("Allow read-only access to a USB drive")
++                      : tr("Allow access to a Rekordbox USB drive"),
++            root,
+             QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+     if (selectedPath.isEmpty()) {
+         return;
+     }
+-    const auto deviceRoot = rekordboxDeviceRootFromSelection(selectedPath);
++    auto deviceRoot = rekordboxDeviceRootFromSelection(selectedPath);
++    if (deviceRoot.isEmpty() && folderUsb) {
++        // A USB without an export is authorized as a whole, read-only volume.
++        const rx3::UsbStorageInfo volume(selectedPath);
++        const auto volumeRoot = QDir::cleanPath(volume.rootPath());
++        if (volume.isReady() && volumeRoot.startsWith(QStringLiteral("/Volumes/"))) {
++            deviceRoot = volumeRoot;
++        }
++    }
+     if (deviceRoot.isEmpty()) {
+         QMessageBox::warning(nullptr, tr("Invalid Rekordbox USB drive"),
+-                tr("The selected folder does not contain PIONEER/rekordbox/export.pdb."));
++                folderUsb ? tr("The selected folder is not on a USB drive.")
++                          : tr("The selected folder does not contain PIONEER/rekordbox/export.pdb."));
+         return;
+     }
+     if (Sandbox::enabled()) {
+@@ -379,6 +448,13 @@ void RekordboxFeature::activateChild(const QModelIndex& index) {
+     const auto root = data[0].toString();
+     const auto kind = data[1].toString();
+ 
++    if (kind == kFolderDeviceItem) {
++        m_selectedRoot = root;
++        if (isFolderOnlyRoot(root)) {
++            m_pLibrary->showUsbFolder(root, root);
++        }
++        return;
++    }
+     if (kind == kDeviceItem) {
+         m_selectedRoot = root;
+         enqueueLoad(root);
+@@ -539,8 +615,14 @@ void RekordboxFeature::setDeviceStatus(
+     }
+ }
+ 
++bool RekordboxFeature::folderUsbSourcesEnabled() const {
++    return !m_pConfig || m_pConfig->getValue<bool>(
++            mixxx::library::prefs::kFolderUsbSourcesConfigKey, true);
++}
++
+ void RekordboxFeature::enqueueLoad(const QString& root) {
+     if (!m_devices.contains(root) ||
++            m_devices.value(root).folderOnly ||
+             m_devices.value(root).state != mixxx::rekordbox::DeviceState::Readable ||
+             m_sessions.contains(root) || m_queuedRoots.contains(root) ||
+             (m_parsePending && m_loadingRoot == root)) {
+@@ -643,6 +725,17 @@ void RekordboxFeature::onRekordboxDevicesFound() {
+             continue;
+         }
+         m_devices.insert(device.snapshot.root, device.snapshot);
++        if (device.snapshot.folderOnly) {
++            // Re-assert the read-only boundary on the GUI thread as well.
++            mixxx::rekordbox::setFolderOnlyRoot(device.snapshot.root, true);
++            additions.push_back(std::make_unique<TreeItem>(device.label,
++                    QVariant(QVariantList{device.snapshot.root,
++                            kFolderDeviceItem,
++                            kStatusReady,
++                            -1,
++                            -1})));
++            continue;
++        }
+         additions.push_back(std::make_unique<TreeItem>(device.label,
+                 QVariant(QVariantList{device.snapshot.root,
+                         kDeviceItem,
+@@ -657,7 +750,8 @@ void RekordboxFeature::onRekordboxDevicesFound() {
+                 std::move(additions), root->childRows());
+     }
+     for (const auto& device : found) {
+-        if (device.snapshot.state == mixxx::rekordbox::DeviceState::Readable) {
++        if (device.snapshot.state == mixxx::rekordbox::DeviceState::Readable &&
++                !device.snapshot.folderOnly) {
+             enqueueLoad(device.snapshot.root);
+         }
+     }
+diff --git a/src/library/rekordbox/rekordboxfeature.h b/src/library/rekordbox/rekordboxfeature.h
+index 164d5d7..59b97ec 100644
+--- a/src/library/rekordbox/rekordboxfeature.h
++++ b/src/library/rekordbox/rekordboxfeature.h
+@@ -36,6 +36,11 @@ class RekordboxFeature final : public LibraryFeature {
+     TreeItemModel* sidebarModel() const override;
+     std::shared_ptr<const mixxx::rekordbox::RuntimeCatalog> catalogForRoot(
+             const QString& root) const;
++    // A connected USB without a rekordbox export (FOLDER browsing, read-only).
++    bool isFolderOnlyRoot(const QString& root) const {
++        return m_devices.contains(root) && m_devices.value(root).folderOnly &&
++                m_devices.value(root).state == mixxx::rekordbox::DeviceState::Readable;
++    }
+     std::optional<mixxx::rekordbox::RuntimeTrack> infoForLocation(const QString& location,QString* root) const;
+     TrackPointer temporaryTrackForRoot(const QString& root,quint32 id,QString* error=nullptr) const {
+         const auto session=m_sessions.value(root);return session?session->createTemporaryTrack(id,error):TrackPointer();
+@@ -68,6 +73,7 @@ class RekordboxFeature final : public LibraryFeature {
+     void setDeviceStatus(const QString& root, const QString& status,
+             int songs = -1, int playlists = -1);
+     void authorizeVolume(const QString& root);
++    bool folderUsbSourcesEnabled() const;
+ 
+     parented_ptr<TreeItemModel> m_pSidebarModel;
+     mixxx::rekordbox::RekordboxRuntimeTrackModel m_runtimeTrackModel;
+diff --git a/src/test/rx3folderusb_test.cpp b/src/test/rx3folderusb_test.cpp
+new file mode 100644
+index 0000000..0883088
+--- /dev/null
++++ b/src/test/rx3folderusb_test.cpp
+@@ -0,0 +1,91 @@
++#include <gtest/gtest.h>
++
++#include <QDir>
++#include <QFile>
++#include <QFileInfo>
++#include <QTemporaryDir>
++
++#include "library/rekordbox/rekordboxdevice.h"
++#include "widget/rx3mysettingswriter.h"
++#include "widget/rx3sourceappearance.h"
++
++namespace {
++using namespace mixxx::rekordbox;
++
++void touch(const QString& path) {
++    ASSERT_TRUE(QDir().mkpath(QFileInfo(path).absolutePath()));
++    QFile file(path);
++    ASSERT_TRUE(file.open(QIODevice::WriteOnly));
++    ASSERT_EQ(file.write("fixture"), 7);
++}
++
++bool isMp3(const QString& name) {
++    return name.endsWith(QStringLiteral(".mp3"), Qt::CaseInsensitive);
++}
++} // namespace
++
++TEST(Rx3FolderUsbTest, FolderUsbIsReadOnlyForEveryWriter) {
++    QTemporaryDir usb;
++    ASSERT_TRUE(usb.isValid());
++    const QString root = QFileInfo(usb.path()).canonicalFilePath();
++    touch(QDir(root).filePath("Music/track.mp3"));
++    ASSERT_TRUE(QDir(root).mkpath("PIONEER"));
++
++    const auto snapshot = inspectFolderDevice(root);
++    ASSERT_EQ(DeviceState::Readable, snapshot.state) << snapshot.error.toStdString();
++    EXPECT_TRUE(snapshot.folderOnly);
++    EXPECT_EQ(root, snapshot.root);
++    EXPECT_FALSE(snapshot.mountIdentity.isEmpty());
++
++    const QString track = QDir(root).filePath("Music/track.mp3");
++    EXPECT_TRUE(isFolderOnlyPath(track));
++    EXPECT_TRUE(isReadOnlyPath(track));
++    EXPECT_TRUE(isReadOnlyPath(QDir(root).filePath("Music/new-file.wav")));
++
++    EXPECT_EQ(QStringLiteral("This USB is read-only in NauticMixxx."),
++            rx3::saveSourceColor(root, 1));
++    EXPECT_FALSE(QFileInfo::exists(rx3::sourceAppearancePath(root)));
++    EXPECT_EQ(QStringLiteral("This USB is read-only in NauticMixxx."),
++            rx3::saveUsbMySettings(root, {{QStringLiteral("quantize"), 1.0}}));
++    EXPECT_EQ(QStringList{"PIONEER"},
++            QDir(root).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name)
++                    .filter(QStringLiteral("PIONEER")));
++    EXPECT_TRUE(QDir(QDir(root).filePath("PIONEER"))
++                        .entryList(QDir::AllEntries | QDir::NoDotAndDotDot)
++                        .isEmpty());
++}
++
++TEST(Rx3FolderUsbTest, RekordboxExportReplacesFolderOnlyClassification) {
++    QTemporaryDir usb;
++    ASSERT_TRUE(usb.isValid());
++    const QString root = QFileInfo(usb.path()).canonicalFilePath();
++    const auto folder = inspectFolderDevice(root);
++    ASSERT_EQ(DeviceState::Readable, folder.state);
++    ASSERT_TRUE(isFolderOnlyPath(root));
++
++    touch(QDir(root).filePath("PIONEER/rekordbox/export.pdb"));
++    const auto exported = inspectDevice(root);
++    EXPECT_FALSE(exported.folderOnly);
++    EXPECT_FALSE(isFolderOnlyPath(root));
++    // Still protected from Mixxx writes as a rekordbox root.
++    EXPECT_TRUE(isReadOnlyPath(QDir(root).filePath("track.mp3")));
++    // Re-discovery treats the two kinds as different devices.
++    EXPECT_FALSE(folder.matches(exported));
++    EXPECT_TRUE(folder.matches(inspectFolderDevice(root)));
++}
++
++TEST(Rx3FolderUsbTest, AudioProbeIsBoundedAndIgnoresSystemFolders) {
++    QTemporaryDir usb;
++    ASSERT_TRUE(usb.isValid());
++    const QString root = usb.path();
++    touch(QDir(root).filePath(".Spotlight-V100/hidden.mp3"));
++    touch(QDir(root).filePath("System Volume Information/hidden.mp3"));
++    touch(QDir(root).filePath("Documents/readme.txt"));
++    EXPECT_FALSE(folderContainsSupportedAudio(root, isMp3));
++
++    touch(QDir(root).filePath("A/B/C/deep.mp3"));
++    EXPECT_FALSE(folderContainsSupportedAudio(root, isMp3, 2));
++    EXPECT_TRUE(folderContainsSupportedAudio(root, isMp3, 3));
++    EXPECT_FALSE(folderContainsSupportedAudio(root, isMp3, 4, 3));
++    EXPECT_FALSE(folderContainsSupportedAudio(QDir(root).filePath("missing"), isMp3));
++}
+diff --git a/src/widget/rx3mysettingswriter.h b/src/widget/rx3mysettingswriter.h
+index 9ddd040..960e571 100644
+--- a/src/widget/rx3mysettingswriter.h
++++ b/src/widget/rx3mysettingswriter.h
+@@ -11,6 +11,7 @@
+ namespace rx3 {
+ // Blocking USB I/O belongs on a worker. Controls are snapshotted by the caller.
+ inline QString saveUsbMySettings(const QString& root,const QMap<QString,double>& values) {
++    if(mixxx::rekordbox::isFolderOnlyPath(root)) return QString("This USB is read-only in NauticMixxx.");
+     rx3::UsbStorageInfo storage(root);storage.refresh();
+     if(root.isEmpty() || !storage.isReady() || storage.isReadOnly()) return QString("Select a writable USB in SOURCE first.");
+     const auto canonicalRoot=QFileInfo(root).canonicalFilePath();
+diff --git a/src/widget/rx3sourceappearance.h b/src/widget/rx3sourceappearance.h
+index ee16bad..019f367 100644
+--- a/src/widget/rx3sourceappearance.h
++++ b/src/widget/rx3sourceappearance.h
+@@ -8,6 +8,8 @@
+ #include <QSaveFile>
+ #include <QStringList>
+ 
++#include "library/rekordbox/rekordboxdevice.h"
++
+ namespace rx3 {
+ inline QStringList sourceColorNames() {
+     return {"DEFAULT","RED","ORANGE","YELLOW","GREEN","AQUA","BLUE","PURPLE"};
+@@ -33,6 +35,7 @@ inline int readSourceColor(const QString& root) {
+             value.toDouble()==index && index>=0 && index<sourceColorNames().size()?index:0;
+ }
+ inline QString saveSourceColor(const QString& root,int color) {
++    if(mixxx::rekordbox::isFolderOnlyPath(root)) return "This USB is read-only in NauticMixxx.";
+     if(root.isEmpty() || !QDir(root).exists() || !QDir(QDir(root).filePath("PIONEER")).exists())
+         return "Select a connected rekordbox USB in SOURCE first.";
+     if(color<0 || color>=sourceColorNames().size()) return "Unsupported background color.";
+diff --git a/src/widget/wrx3browser.h b/src/widget/wrx3browser.h
+index fe5a9da..ef89f46 100644
+--- a/src/widget/wrx3browser.h
++++ b/src/widget/wrx3browser.h
+@@ -550,6 +550,11 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+     }
+     void openSearch() {
+         if(!deviceReady(m_selectedDevice)) {showSources();return;}
++        if(isFolderOnlyDevice(m_selectedDevice)) {
++            m_pages->setCurrentIndex(0);
++            showNotice("SEARCH needs a rekordbox USB.\nBrowse this USB by FOLDER.");
++            return;
++        }
+         m_selectedCategory="SEARCH";m_search->clear();
+         m_searchHasAllTracks=false;
+         m_backend->rekordboxFeature()->showTrackIds(m_currentRoot,{},"search");showTrackList(BrowserLevel::Categories);
+@@ -599,6 +604,12 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+                 ? m_categoryIds.at(m_categories->currentRow()) : quint16(0);
+         m_categories->clear();m_categoryIds.clear();
+         if(!m_selectedDevice.isValid()) {showSources();return;}
++        if(isFolderOnlyDevice(m_selectedDevice)) {
++            auto* item=new QListWidgetItem("\nFOLDER",m_categories);
++            item->setTextAlignment(Qt::AlignCenter);item->setSizeHint(QSize(94,65));
++            m_categoryIds.append(quint16(0xFFFF));m_categories->setCurrentRow(0);
++            m_level=BrowserLevel::Categories;return;
++        }
+         const auto currentCatalog=catalog();
+         if(deviceStatus(m_selectedDevice)!="ready" || !currentCatalog) return;
+         const auto menu=currentCatalog->browseMenu();
+@@ -816,7 +827,8 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+     void selectCategory(int row) {
+         if(m_detailedInfo->isVisible()) ControlObject::set(ConfigKey("[RX3Info]","visible"),0);
+         if(row<0 || row>=m_categoryIds.size() || !m_selectedDevice.isValid()) return;
+-        if(deviceStatus(m_selectedDevice)!="ready" || !catalog()) {
++        if(deviceStatus(m_selectedDevice)!="ready" ||
++                (!catalog() && !isFolderOnlyDevice(m_selectedDevice))) {
+             showSources();
+             return;
+         }
+@@ -1037,8 +1049,15 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+     QString deviceStatus(const QPersistentModelIndex& device) const {
+         return device.data(SidebarModel::DataRole).toList().value(2).toString();
+     }
++    // A USB without a rekordbox export: FOLDER browsing only, always read-only.
++    bool isFolderOnlyDevice(const QPersistentModelIndex& device) const {
++        if(!device.isValid() || deviceStatus(device)!="ready") return false;
++        auto* feature=m_backend?m_backend->rekordboxFeature():nullptr;
++        return feature && feature->isFolderOnlyRoot(deviceRoot(device));
++    }
+     bool deviceReady(const QPersistentModelIndex& device) const {
+         if(!device.isValid() || deviceStatus(device)!="ready") return false;
++        if(isFolderOnlyDevice(device)) return true;
+         auto* feature=m_backend?m_backend->rekordboxFeature():nullptr;
+         const auto currentCatalog=feature ? feature->catalogForRoot(deviceRoot(device)) : nullptr;
+         return currentCatalog && !currentCatalog->browseMenu().categories.isEmpty();
+@@ -1230,12 +1249,14 @@ class WRx3Browser : public QWidget, public WBaseWidget {
+         QString songs,playlists,total,available,date;
+         const bool hasDevice=row>=0 && row<int(m_devices.size());
+         const bool ready=hasDevice && deviceReady(m_devices[row]);
+-        m_sourceSettings->setEnabled(ready);
++        const bool folderOnly=hasDevice && isFolderOnlyDevice(m_devices[row]);
++        m_sourceSettings->setEnabled(ready && !folderOnly);
+         for(int i=1;i<=4;++i) m_headerButtons[i]->setEnabled(ready ||
+                 (m_pages->currentIndex()!=1 && deviceReady(m_selectedDevice)));
+         if(hasDevice) {
+             const auto data=m_devices[row].data(SidebarModel::DataRole).toList();
+-            if(ready) {songs=data.value(3).toString();playlists=data.value(4).toString();}
++            if(ready && folderOnly) {songs=QStringLiteral("—");playlists=QStringLiteral("— (FOLDER · READ ONLY)");}
++            else if(ready) {songs=data.value(3).toString();playlists=data.value(4).toString();}
+             QStorageInfo volume(data.value(0).toString());
+             if(volume.isValid() && volume.isReady()) {
+                 total=QString::number(volume.bytesTotal()/1e9,'f',1);
+diff --git a/src/widget/wrx3browsertools.h b/src/widget/wrx3browsertools.h
+index 4e5aacc..41f8bc2 100644
+--- a/src/widget/wrx3browsertools.h
++++ b/src/widget/wrx3browsertools.h
+@@ -188,7 +188,7 @@ inline void WRx3Browser::showAudioTools() {
+ inline void WRx3Browser::showRecordingTools() {
+     m_tools->showMenu("USB RECORDING",{
+         toolAction("START RECORDING TO SELECTED USB",[this]{
+-            if(!m_config || !catalog()) {m_tools->message("Select a connected USB in SOURCE first.");return;}
++            if(!m_config || !catalog() || mixxx::rekordbox::isFolderOnlyPath(m_currentRoot)) {m_tools->message("Select a connected rekordbox USB in SOURCE first.");return;}
+             if(ControlObject::get(ConfigKey("[Recording]","status"))>0) {m_tools->message("A recording is already active.");return;}
+             rx3::UsbStorageInfo storage(m_currentRoot);storage.refresh();
+             if(!storage.isReady() || storage.isReadOnly() || storage.bytesAvailable()<=1024LL*1024*1024) {m_tools->message("USB unavailable, read-only or less than 1 GiB free.");return;}
